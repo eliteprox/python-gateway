@@ -14,7 +14,11 @@ uv run examples/get_orchestrator_info.py localhost:8935
 On-chain mode
 
 ```
-uv run examples/get_orchestrator_info.py --signer-url "<signer-host:port>"
+uv run examples/get_orchestrator_info.py --signer "<signer-host:port>"
+
+# Use a custom discovery endpoint to filter orchestrators
+uv run examples/get_orchestrator_info.py --signer "<signer-host:port>" '<discovery-host>/discover-orchestrators?cap=streamdiffusion-sdxl-v2v'
+
 ```
 
 Write raw frames to a LiveVideoToVideo job
