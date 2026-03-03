@@ -4,21 +4,15 @@ import base64
 import json
 import logging
 import re
-import ssl
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from . import lp_rpc_pb2
-from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired, SkipPaymentCycle
+from .errors import LivepeerGatewayError, PaymentError
+from .payments_base import BasePaymentSession, GetPaymentResponse
 _LOG = logging.getLogger(__name__)
-
-@dataclass(frozen=True)
-class GetPaymentResponse:
-    payment: str
-    seg_creds: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -152,153 +146,31 @@ def get_orch_info_sig(
     return SignerMaterial(address=address, sig=sig)
 
 
-class PaymentSession:
+class PaymentSession(BasePaymentSession):
     def __init__(
         self,
         signer_url: Optional[str],
         info: lp_rpc_pb2.OrchestratorInfo,
         *,
         signer_headers: Optional[dict[str, str]] = None,
-        type: str,
+        type: str = "lv2v",
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         use_tofu: bool = True,
         max_refresh_retries: int = 3,
     ) -> None:
-        self._signer_url = signer_url
-        self._signer_headers = signer_headers
-        self._info = info
-        self._type = type
-        self._manifest_id: Optional[str] = None
-        self._capabilities = capabilities
-        self._use_tofu = use_tofu
-        self._max_refresh_retries = max(0, int(max_refresh_retries))
-        self._state: Optional[dict[str, str]] = None
+        super().__init__(
+            signer_url,
+            info,
+            signer_headers=signer_headers,
+            payment_type=type,
+            capabilities=capabilities,
+            max_refresh_retries=max_refresh_retries,
+        )
 
-    def set_manifest_id(self, manifest_id: str) -> None:
-        if not isinstance(manifest_id, str) or not manifest_id.strip():
-            raise PaymentError("manifest_id must be a non-empty string")
-        self._manifest_id = manifest_id.strip()
-
-    def get_payment(self) -> GetPaymentResponse:
-        """
-        Generate a payment via the remote signer.
-
-        Handles signer state round-tripping internally.
-        On HTTP 480, refreshes OrchestratorInfo and retries
-        (up to max_refresh_retries).
-        Returns payment + seg_creds for use as HTTP headers.
-        """
-
-        # Offchain mode: still send the expected headers, but with empty content.
-        if not self._signer_url:
-            seg = lp_rpc_pb2.SegData()
-            if not self._info.HasField("auth_token"):
-                raise PaymentError(
-                    "Orchestrator did not provide an auth token."
-                )
-            seg.auth_token.CopyFrom(self._info.auth_token)
-            seg = base64.b64encode(seg.SerializeToString()).decode("ascii")
-            return GetPaymentResponse(seg_creds=seg, payment="")
-
-        def _payment_request() -> GetPaymentResponse:
-            from .orchestrator import _http_origin, post_json
-
-            base = _http_origin(self._signer_url)
-            url = f"{base}/generate-live-payment"
-
-            pb = self._info.SerializeToString()
-            orch_b64 = base64.b64encode(pb).decode("ascii")
-            payload: dict[str, Any] = {
-                "orchestrator": orch_b64,
-                "type": self._type,
-            }
-            if self._manifest_id is not None:
-                payload["ManifestID"] = self._manifest_id
-            if self._state is not None:
-                payload["state"] = self._state
-
-            data = post_json(url, payload, headers=self._signer_headers)
-            payment = data.get("payment")
-            if not isinstance(payment, str) or not payment:
-                raise PaymentError(
-                    f"GetPayment error: missing/invalid 'payment' in response (url={url})"
-                )
-
-            seg_creds = data.get("segCreds")
-            if seg_creds is not None and not isinstance(seg_creds, str):
-                raise PaymentError(
-                    f"GetPayment error: invalid 'segCreds' in response (url={url})"
-                )
-
-            state = data.get("state")
-            if not isinstance(state, dict):
-                raise PaymentError(
-                    f"Remote signer response missing 'state' object (url={url})"
-                )
-
-            self._state = state
-            return GetPaymentResponse(payment=payment, seg_creds=seg_creds)
-
-        attempts = 0
-        while True:
-            try:
-                return _payment_request()
-            except SignerRefreshRequired as e:
-                if attempts >= self._max_refresh_retries:
-                    raise PaymentError(
-                        f"Signer refresh required after {attempts} retries: {e}"
-                    ) from e
-                if not self._info.transcoder:
-                    raise PaymentError(
-                        "OrchestratorInfo missing transcoder URL for refresh"
-                    )
-                from .orch_info import get_orch_info
-
-                self._info = get_orch_info(
-                    self._info.transcoder,
-                    signer_url=self._signer_url,
-                    signer_headers=self._signer_headers,
-                    capabilities=self._capabilities,
-                    use_tofu=self._use_tofu,
-                )
-                attempts += 1
-
-    def send_payment(self) -> None:
-        """
-        Generate a payment (via get_payment) and forward it
-        to the orchestrator via POST {orch}/payment.
-        """
-        from .orchestrator import _extract_error_message, _http_origin
-
-        p = self.get_payment()
-        if not self._info.transcoder:
-            raise PaymentError("OrchestratorInfo missing transcoder URL for payment")
-        base = _http_origin(self._info.transcoder)
-        url = f"{base}/payment"
-        headers = {
-            "Livepeer-Payment": p.payment,
-            "Livepeer-Segment": p.seg_creds or "",
-        }
-        req = Request(url, data=b"", headers=headers, method="POST")
-        ssl_ctx = ssl._create_unverified_context()
-        try:
-            with urlopen(req, timeout=5.0, context=ssl_ctx) as resp:
-                resp.read()
-        except HTTPError as e:
-            body = _extract_error_message(e)
-            body_part = f"; body={body!r}" if body else ""
-            raise PaymentError(
-                f"HTTP payment error: HTTP {e.code} from endpoint (url={url}){body_part}"
-            ) from e
-        except ConnectionRefusedError as e:
-            raise PaymentError(
-                f"HTTP payment error: connection refused (is the server running? is the host/port correct?) (url={url})"
-            ) from e
-        except URLError as e:
-            raise PaymentError(
-                f"HTTP payment error: failed to reach endpoint: {getattr(e, 'reason', e)} (url={url})"
-            ) from e
-        except Exception as e:
-            raise PaymentError(
-                f"HTTP payment error: unexpected error: {e.__class__.__name__}: {e} (url={url})"
-            ) from e
+    def _offchain_payment(self) -> GetPaymentResponse:
+        seg = lp_rpc_pb2.SegData()
+        if not self._info.HasField("auth_token"):
+            raise PaymentError("Orchestrator did not provide an auth token.")
+        seg.auth_token.CopyFrom(self._info.auth_token)
+        seg_b64 = base64.b64encode(seg.SerializeToString()).decode("ascii")
+        return GetPaymentResponse(seg_creds=seg_b64, payment="")
