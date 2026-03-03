@@ -45,6 +45,7 @@ class CapabilityId(IntEnum):
     IMAGE_TO_TEXT = 34
     LIVE_VIDEO_TO_VIDEO = 35
     TEXT_TO_SPEECH = 36
+    BYOC = 37
 
 CAPABILITY_ID_TO_NAME: dict[int, str] = {
     -2: "Invalid",
@@ -85,6 +86,7 @@ CAPABILITY_ID_TO_NAME: dict[int, str] = {
     34: "Image to text",
     35: "Live video to video",
     36: "Text to speech",
+    37: "Byoc",
 }
 
 
