@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 
+from livepeer_gateway import TricklePublisherTerminalError, TrickleSegmentWriteError
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
 
@@ -59,7 +60,16 @@ async def main() -> None:
             raise ValueError("--message must be a JSON object")
 
         for i in range(max(0, args.count)):
-            await job.control.write({**msg, "n": i})
+            try:
+                await job.control.write({**msg, "n": i})
+            except TrickleSegmentWriteError as e:
+                # Segment failures can be transient; keep sending later messages.
+                print(f"WARN: dropped control message n={i}: {e}")
+                continue
+            except TricklePublisherTerminalError as e:
+                # Terminal publisher errors require stopping/recreating publisher state.
+                print(f"ERROR: terminal control publisher failure: {e}")
+                break
             if i + 1 < args.count:
                 await asyncio.sleep(args.interval)
 

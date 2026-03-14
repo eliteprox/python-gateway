@@ -122,6 +122,8 @@ class TrickleSubscriber:
         assert self._lock is not None
 
         async with self._lock:
+            # We intentionally serialize preconnect/next under one lock to avoid
+            # overlapping fetches that could race and stomp segment ordering.
             if self._errored:
                 _LOG.debug("Trickle subscription closed or errored for %s", self.base_url)
                 return None

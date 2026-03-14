@@ -75,7 +75,15 @@ class JSONLWriter:
         async with self._lock:
             if self._writer is None:
                 self._writer = await self._publisher.next()
-            await self._writer.write(payload)
+            try:
+                await self._writer.write(payload)
+            except Exception:
+                # Error writing; reset writer and recreate it on the next write.
+                # NB: this could be a `TricklePublisherTerminalError` which
+                # the application might want to catch and handle specifically
+                await self._writer.close()
+                self._writer = None
+                raise
 
     async def close(self) -> None:
         """

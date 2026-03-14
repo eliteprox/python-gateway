@@ -9,13 +9,17 @@ import threading
 import time
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Optional, Set, Callable, Awaitable, Any, BinaryIO
+from typing import Optional, Set, Awaitable, Any, BinaryIO
 
 import av
 from av.video.frame import PictureType
 
 from .errors import LivepeerGatewayError
-from .trickle_publisher import TricklePublisher
+from .trickle_publisher import (
+    TricklePublisher,
+    TricklePublisherTerminalError,
+    TrickleSegmentWriteError,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -50,7 +54,6 @@ class MediaPublishConfig:
     fps: Optional[float] = None
     mime_type: str = "video/mp2t"
     keyframe_interval_s: float = 2.0
-    on_segment_error: Optional[Callable[[int, BaseException], None]] = None
 
 
 class MediaPublish:
@@ -64,7 +67,6 @@ class MediaPublish:
         self._publisher = TricklePublisher(
             publish_url,
             config.mime_type,
-            on_segment_error=config.on_segment_error,
         )
         self._keyframe_interval_s = float(config.keyframe_interval_s)
         self._fps_hint = config.fps
@@ -304,36 +306,11 @@ class MediaPublish:
 
         self._loop.call_soon_threadsafe(_start)
 
-    def _handle_stream_segment_failure(self, seq: int) -> None:
-        terminal = self._publisher.terminal_error()
-        if terminal is not None:
-            if self._error is None:
-                err = LivepeerGatewayError(
-                    "MediaPublish terminal failure while streaming segment data"
-                )
-                err.__cause__ = terminal
-                self._error = err
-            _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
-            return
-        _LOG.warning("MediaPublish dropped segment seq=%s", seq, exc_info=True)
-
     async def _stream_pipe_to_trickle(self, read_file: BinaryIO) -> None:
+        segment_seq: Optional[int] = None
         try:
             segment = await self._publisher.next()
-        except LivepeerGatewayError as e:
-            # At this point, publisher.next() has exhausted its retries
-            if self._error is None:
-                # Error will be picked up on the next frame write
-                err = LivepeerGatewayError(
-                    "MediaPublish terminal failure while opening next segment"
-                )
-                err.__cause__ = e
-                self._error = err
-            _LOG.error("MediaPublish terminal failure", exc_info=True)
-            await self._drain_pipe(read_file)
-            return
-
-        try:
+            segment_seq = segment.seq()
             async with segment:
                 while True:
                     chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
@@ -342,14 +319,24 @@ class MediaPublish:
                     # NB: the segment writer has its own chunk timeout, so
                     # lean on that instead of doing that here
                     await segment.write(chunk)
+        except TricklePublisherTerminalError as e:
+            # At this point, publisher.next() has exhausted its retries and the
+            # publisher cannot be used for future segments.
+            if self._error is None:
+                self._error = e
+            _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
+        except TrickleSegmentWriteError:
+            _LOG.warning("MediaPublish dropped segment seq=%s", segment_seq, exc_info=True)
         except Exception:
-            # Couldn't publish the current segment for some reason.
-            self._handle_stream_segment_failure(segment.seq())
-            await self._drain_pipe(read_file)
+            _LOG.exception(
+                "MediaPublish unexpected failure while streaming segment seq=%s",
+                segment_seq,
+            )
         finally:
-            # This block is critical for clean-up safety; always close file
+            # This block is critical for clean-up; always drain and close file
             # Because not all exceptions will be caught (eg, CancelledError)
             try:
+                await self._drain_pipe(read_file)
                 read_file.close()
             except Exception:
                 pass

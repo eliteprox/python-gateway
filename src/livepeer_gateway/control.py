@@ -29,6 +29,10 @@ class Control:
         Publish an unstructured JSON message onto the trickle channel.
 
         One `write()` call sends one message per trickle segment.
+
+        Raises:
+            TrickleSegmentWriteError: current segment failed but publisher may continue.
+            TricklePublisherTerminalError: publisher entered terminal failure state.
         """
         if not isinstance(msg, dict):
             raise TypeError(f"write expects dict, got {type(msg).__name__}")
