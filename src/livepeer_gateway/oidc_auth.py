@@ -41,6 +41,19 @@ from urllib.request import Request, urlopen
 
 _LOG = logging.getLogger(__name__)
 
+
+def _ensure_https_for_display(url: str) -> str:
+    """Upgrade http to https for non-localhost URLs so users open the secure page."""
+    if not url or not url.startswith("http://"):
+        return url
+    try:
+        parsed = urlparse(url)
+        if parsed.hostname in (None, "localhost", "127.0.0.1") or parsed.hostname.endswith(".local"):
+            return url
+        return url.replace("http://", "https://", 1)
+    except Exception:
+        return url
+
 DEFAULT_CLIENT_ID = "livepeer-sdk"
 DEFAULT_SCOPES = "openid profile gateway"
 _CALLBACK_PATH = "/callback"
@@ -325,8 +338,8 @@ def device_login(
 
     device_code = data["device_code"]
     user_code = data["user_code"]
-    verification_uri = data.get("verification_uri", "")
-    verification_uri_complete = data.get("verification_uri_complete", "")
+    verification_uri = _ensure_https_for_display(data.get("verification_uri", ""))
+    verification_uri_complete = _ensure_https_for_display(data.get("verification_uri_complete", ""))
     expires_in = int(data.get("expires_in", 600))
     interval = int(data.get("interval", 5))
 
@@ -532,6 +545,20 @@ def clear_cached_token(base_url: str, *, client_id: str = DEFAULT_CLIENT_ID, sco
     """Remove the cached token for the given base URL."""
     path = _cache_dir() / f"{_cache_key(base_url, client_id, scopes)}.json"
     path.unlink(missing_ok=True)
+
+
+def clear_all_cached_tokens() -> int:
+    """
+    Remove all cached OIDC tokens (logout). Returns the number of tokens cleared.
+    """
+    cache = _cache_dir()
+    if not cache.exists():
+        return 0
+    count = 0
+    for path in cache.glob("*.json"):
+        path.unlink(missing_ok=True)
+        count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
