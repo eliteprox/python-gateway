@@ -1,0 +1,291 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: get_orchestrator_info",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/get_orchestrator_info.py",
+            "console": "integratedTerminal",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net"
+            ],
+            "env": {
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--billing-url",
+                "https://pymthouse.com",
+                "--model",
+                "noop",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames (signer)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--model",
+                "noop",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: stream_video_file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/stream_video_file.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--capability",
+                "comfystream",
+                "--input",
+                "${env:HOME}/audio_only.mp4",
+                "--enable-data-output"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "python": "${command:python.interpreterPath}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames (billing)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+                "--model",
+                "noop",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: byoc_write_frames (billing)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_frames.py",
+            "args": [
+                "--billing-url",
+                "https://pymthouse.com",
+                "--capability",
+                "comfystream",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames (pymthouse.com)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+                "--model",
+                "comfystream",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames (pymthouse.com browser)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+                "--browser",
+                "--model",
+                "comfystream",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: byoc_write_frames (pymthouse.com)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_frames.py",
+            "args": [
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+                "--capability",
+                "comfystream",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: select_orchestrator",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/select_orchestrator.py",
+            "args": [
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--debug"
+            ],
+            "env": {
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: capability_discovery_service (aiServiceRegistry)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/orch_discovery.py",
+            "args": [
+                "--service-registry-addr",
+                "0xC92d3A360b8f9e083bA64DE15d95Cf8180897431",
+                "--eth-rpc",
+                "http://arb.eliteencoder.net:3517",
+                "--port",
+                "9876"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "${command:python.interpreterPath}"
+        },
+        {
+            "name": "Python: byoc_job",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_job.py",
+            "args": [
+                "comfystream",
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--duration",
+                "30"
+            ],
+            "env": {
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: byoc_write_frames",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_frames.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--capability",
+                "comfystream",
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--count",
+                "900000"
+            ],
+            "env": {
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: run_session",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder:livepeer-python-gateway}/examples/run_session.py",
+            "python": "${workspaceFolder:livepeer-python-gateway}/.venv/bin/python",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net",
+                "--capability",
+                "comfystream",
+                "--input",
+                "${env:HOME}/testlong.mp4",
+                "--fps",
+                "30.0",
+                "--keyframe-interval",
+                "2.0",
+                "--record-output",
+                "${env:HOME}/test_recordinglong.ts"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "LIVEPEER_REMOTE_SIGNER_JWT": "${env:LIVEPEER_REMOTE_SIGNER_JWT}"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
