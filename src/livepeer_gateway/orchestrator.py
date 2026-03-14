@@ -203,6 +203,26 @@ def _http_origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _join_signer_endpoint(signer_url: str, path: str) -> str:
+        """
+        Join an endpoint path onto signer_url while preserving any existing base path.
+
+        Examples:
+        - https://pymthouse.com/api/signer + /sign-orchestrator-info
+            -> https://pymthouse.com/api/signer/sign-orchestrator-info
+        - https://pymthouse.com/api/signer/sign-orchestrator-info + same path
+            -> unchanged
+        """
+        if not isinstance(signer_url, str) or not signer_url.strip():
+                raise ValueError("signer_url must be a non-empty string")
+
+        suffix = path if path.startswith("/") else f"/{path}"
+        base = signer_url.strip().rstrip("/")
+        if base.endswith(suffix):
+                return base
+        return f"{base}{suffix}"
+
+
 def _append_caps(url: str, capabilities: Optional[lp_rpc_pb2.Capabilities]) -> str:
     """
     Append repeated `caps` query parameters to a URL.
@@ -262,7 +282,7 @@ def discover_orchestrators(
         discovery_endpoint = _parse_http_url(discovery_url).geturl()
         request_headers = discovery_headers
     elif signer_url:
-        discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+        discovery_endpoint = _join_signer_endpoint(signer_url, "/discover-orchestrators")
         request_headers = signer_headers
     else:
         _LOG.debug("discover_orchestrators failed: no discovery inputs")

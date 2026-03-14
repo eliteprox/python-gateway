@@ -53,10 +53,9 @@ class BYOCPaymentSession(BasePaymentSession):
         if not isinstance(parameters, str):
             raise PaymentError("parameters must be a JSON string")
 
-        from .orchestrator import _http_origin, post_json
+        from .orchestrator import _join_signer_endpoint, post_json
 
-        base = _http_origin(self._signer_url)
-        url = f"{base}/sign-byoc-job"
+        url = _join_signer_endpoint(self._signer_url, "/sign-byoc-job")
         data = post_json(
             url,
             {"request": request, "parameters": parameters},

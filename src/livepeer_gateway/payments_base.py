@@ -75,10 +75,9 @@ class BasePaymentSession:
         )
 
     def _request_payment(self) -> GetPaymentResponse:
-        from .orchestrator import _http_origin, post_json
+        from .orchestrator import _join_signer_endpoint, post_json
 
-        base = _http_origin(self._signer_url)
-        url = f"{base}/generate-live-payment"
+        url = _join_signer_endpoint(self._signer_url, "/generate-live-payment")
         data = post_json(url, self._build_payment_payload(), headers=self._signer_headers)
 
         payment = data.get("payment")
