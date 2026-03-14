@@ -24,7 +24,15 @@ from .media_decode import (
 from .media_output import MediaOutput, MediaOutputStats
 from .errors import OrchestratorRejection
 from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
-from .oidc_auth import ensure_valid_token, login as oidc_login, device_login as oidc_device_login, refresh as oidc_refresh, TokenSet, OIDCConfig
+from .oidc_auth import (
+    ensure_valid_token,
+    login as oidc_login,
+    device_login as oidc_device_login,
+    refresh as oidc_refresh,
+    clear_all_cached_tokens,
+    TokenSet,
+    OIDCConfig,
+)
 from .orch_info import get_orch_info
 from .orchestrator import discover_orchestrators
 from .remote_signer import PaymentSession
@@ -42,6 +50,7 @@ from .segment_reader import SegmentReader, SegmentReaderStats
 from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 
 __all__ = [
+    "clear_all_cached_tokens",
     "Control",
     "ControlConfig",
     "ControlMode",
