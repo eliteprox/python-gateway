@@ -22,6 +22,16 @@ class NoOrchestratorAvailableError(LivepeerGatewayError):
         super().__init__(message)
         self.rejections: list[OrchestratorRejection] = rejections or []
 
+    def __str__(self) -> str:
+        base = super().__str__()
+        if not self.rejections:
+            return base
+
+        lines = [base, "Attempt details:"]
+        for idx, rejection in enumerate(self.rejections, start=1):
+            lines.append(f"  {idx}. orch={rejection.url} | {rejection.reason}")
+        return "\n".join(lines)
+
 
 class SignerRefreshRequired(LivepeerGatewayError):
     """Raised when the remote signer returns HTTP 480 and a refresh is required."""

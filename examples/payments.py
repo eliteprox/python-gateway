@@ -41,6 +41,23 @@ def _parse_args() -> argparse.Namespace:
         help="Remote signer URL (no path). If omitted, runs in offchain mode.",
     )
     p.add_argument(
+        "--billing-url",
+        default=None,
+        help="Billing gateway URL (e.g. https://pymthouse.com). "
+             "Auto-detects OIDC login or direct signer mode.",
+    )
+    p.add_argument(
+        "--client-id",
+        default=None,
+        help="OIDC client ID for billing gateway (default: livepeer-sdk).",
+    )
+    p.add_argument(
+        "--browser",
+        action="store_true",
+        default=False,
+        help="Use browser-based PKCE login instead of Device Authorization Flow.",
+    )
+    p.add_argument(
         "--model",
         default=DEFAULT_MODEL_ID,
         help=f"Pipeline model. Default: {DEFAULT_MODEL_ID}",
@@ -87,6 +104,9 @@ def main() -> None:
             StartJobRequest(model_id=args.model),
             signer_url=args.signer,
             discovery_url=args.discovery,
+            billing_url=args.billing_url,
+            client_id=args.client_id,
+            headless=not args.browser,
         )
     except LivepeerGatewayError as e:
         print(f"ERROR: {e}")
