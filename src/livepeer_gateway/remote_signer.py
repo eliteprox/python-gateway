@@ -72,15 +72,15 @@ def get_orch_info_sig(
     Fetch signer material exactly once per (signer_url, headers) combination
     for the lifetime of the process. Subsequent calls return cached data.
     """
-    from .orchestrator import _extract_error_message, _http_origin, post_json
+    from .orchestrator import _extract_error_message, _join_signer_endpoint, post_json
 
     # check for offchain mode
     if not signer_url:
         return SignerMaterial(address=None, sig=None)
 
-    # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
-    # Normalize to an https:// origin and append the expected path.
-    signer_url = f"{_http_origin(signer_url)}/sign-orchestrator-info"
+    # Accept either a signer base URL (for example: .../api/signer)
+    # or a full URL ending with /sign-orchestrator-info.
+    signer_url = _join_signer_endpoint(signer_url, "/sign-orchestrator-info")
     headers = dict(_signer_headers) if _signer_headers else None
 
     try:

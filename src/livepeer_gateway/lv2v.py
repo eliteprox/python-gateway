@@ -50,10 +50,13 @@ def _parse_token(token: str) -> dict[str, Any]:
 
     signer = payload.get("signer")
     discovery = payload.get("discovery")
+    billing = payload.get("billing")
     if signer is not None and not isinstance(signer, str):
         raise LivepeerGatewayError("Invalid token: signer must be a string")
     if discovery is not None and not isinstance(discovery, str):
         raise LivepeerGatewayError("Invalid token: discovery must be a string")
+    if billing is not None and not isinstance(billing, str):
+        raise LivepeerGatewayError("Invalid token: billing must be a string")
 
     signer_headers = payload.get("signer_headers")
     discovery_headers = payload.get("discovery_headers")
@@ -65,9 +68,46 @@ def _parse_token(token: str) -> dict[str, Any]:
     return {
         "signer": signer,
         "discovery": discovery,
+        "billing": billing,
         "signer_headers": signer_headers,
         "discovery_headers": discovery_headers,
     }
+
+
+def _resolve_billing(
+    billing_url: Optional[str],
+    signer_url: Optional[str],
+    signer_headers: Optional[dict[str, str]],
+    discovery_url: Optional[str],
+    *,
+    client_id: str = "livepeer-sdk",
+    scopes: str = "openid profile gateway",
+    headless: bool = True,
+) -> tuple[Optional[str], Optional[dict[str, str]], Optional[str]]:
+    """
+    When billing_url is provided and signer_url is not set, resolve signer
+    credentials automatically.  Probes for OIDC discovery to decide between
+    authenticated gateway mode and plain remote signer mode.
+
+    Returns (signer_url, signer_headers, discovery_url) — potentially updated.
+    """
+    if not billing_url or signer_url:
+        return signer_url, signer_headers, discovery_url
+
+    from .oidc_auth import ensure_valid_token, probe_oidc
+
+    base = billing_url.rstrip("/")
+
+    if probe_oidc(base):
+        tokens = ensure_valid_token(base, client_id=client_id, scopes=scopes, headless=headless)
+        resolved_signer = f"{base}/api/signer"
+        resolved_headers = {"Authorization": f"Bearer {tokens.access_token}"}
+        resolved_discovery = discovery_url or f"{base}/api/signer/discover-orchestrators"
+        return resolved_signer, resolved_headers, resolved_discovery
+
+    # No OIDC — treat as a plain remote signer URL
+    _LOG.info("No OIDC discovery at %s; using as direct signer URL", base)
+    return base, signer_headers, discovery_url
 
 
 @dataclass(frozen=True)
@@ -292,6 +332,10 @@ def start_lv2v(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    control_config: Optional[ControlConfig] = None,
+    billing_url: Optional[str] = None,
+    client_id: Optional[str] = None,
+    headless: bool = True,
 ) -> LiveVideoToVideo:
     """
     Start a live video-to-video job.
@@ -320,6 +364,7 @@ def start_lv2v(
     resolved_signer_headers = signer_headers
     resolved_discovery_url = discovery_url
     resolved_discovery_headers = discovery_headers
+    resolved_billing_url = billing_url
     if token is not None:
         token_data = _parse_token(token)
         if resolved_signer_url is None:
@@ -330,6 +375,22 @@ def start_lv2v(
             resolved_discovery_url = token_data.get("discovery")
         if resolved_discovery_headers is None:
             resolved_discovery_headers = token_data.get("discovery_headers")
+        if resolved_billing_url is None:
+            resolved_billing_url = token_data.get("billing")
+
+    # If billing_url is set and signer_url is not, auto-resolve via OIDC or direct
+    billing_kwargs: dict[str, Any] = {}
+    if client_id is not None:
+        billing_kwargs["client_id"] = client_id
+    if headless:
+        billing_kwargs["headless"] = True
+    resolved_signer_url, resolved_signer_headers, resolved_discovery_url = _resolve_billing(
+        resolved_billing_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        **billing_kwargs,
+    )
 
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, req.model_id)
     # Orchestrator discovery precedence:
@@ -358,6 +419,7 @@ def start_lv2v(
                 ) from None
             raise
 
+        start_url: Optional[str] = None
         try:
             session = PaymentSession(
                 resolved_signer_url,
@@ -373,8 +435,8 @@ def start_lv2v(
             }
 
             base = _http_origin(info.transcoder)
-            url = f"{base}/live-video-to-video"
-            data = post_json(url, req.to_json(), headers=headers)
+            start_url = f"{base}/live-video-to-video"
+            data = post_json(start_url, req.to_json(), headers=headers)
             job = LiveVideoToVideo.from_json(
                 data,
                 orchestrator_info=info,
@@ -391,4 +453,8 @@ def start_lv2v(
                 selected_url,
                 str(e),
             )
-            start_rejections.append(OrchestratorRejection(url=selected_url, reason=str(e)))
+            if start_url:
+                reason = f"request=POST {start_url}; error={e}"
+            else:
+                reason = str(e)
+            start_rejections.append(OrchestratorRejection(url=selected_url, reason=reason))

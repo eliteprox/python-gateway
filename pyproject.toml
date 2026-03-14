@@ -10,6 +10,7 @@ dependencies = [
   "grpcio>=1.65.0",
   "aiohttp>=3.9.0",
   "av>=11.0.0",
+  "protobuf",
 ]
 
 [project.scripts]
