@@ -168,6 +168,10 @@ class TricklePublisher:
                 final_status = None
                 final_body = None
 
+            if final_status == 404:
+                # Stream doesn't exist on the server; fail fast and do not retry.
+                break
+
             if not seg_state.data_consumed and attempt == 0:
                 _LOG.warning(
                     "Trickle POST retrying same segment url=%s (no request body consumed)",
@@ -182,6 +186,15 @@ class TricklePublisher:
             _LOG.error("Trickle POST exception url=%s error=%s", url, final_exc)
         assert final_exc is not None
         self._record_segment_failure(final_exc, seg_state)
+        if final_status == 404 and self._terminal_error is None:
+            _LOG.error("Trickle publisher channel does not exist url=%s", self.url)
+            terminal_exc = TricklePublisherTerminalError(
+                "Trickle publisher channel does not exist",
+                consecutive_failures=self._consecutive_failures,
+                url=self.url,
+            )
+            terminal_exc.__cause__ = final_exc
+            self._terminal_error = terminal_exc
 
     def _record_segment_failure(
         self,
@@ -191,10 +204,7 @@ class TricklePublisher:
         seg_state.error = exc
         self._consecutive_failures += 1
         # check whether failure limit has been hit
-        if (
-            self._consecutive_failures >= self._max_consecutive_failures
-            and self._terminal_error is None
-        ):
+        if self._terminal_error is None and self._consecutive_failures >= self._max_consecutive_failures:
             _LOG.error(
                 "Trickle publisher reached terminal failure state after %s consecutive failures",
                 self._consecutive_failures,
