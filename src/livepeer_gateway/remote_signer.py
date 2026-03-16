@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
-from urllib.error import HTTPError, URLError
+
+import httpx
 
 from . import lp_rpc_pb2
 from .errors import LivepeerGatewayError, PaymentError
@@ -103,30 +104,19 @@ def get_orch_info_sig(
         sig = _hex_to_bytes(str(data["signature"]))  # signature length may vary
 
     except LivepeerGatewayError as e:
-        # post_json wraps the underlying exception as __cause__; convert back into
-        # a signer-specific error message.
         cause = e.__cause__ or e
 
-        if isinstance(cause, HTTPError):
-            body = _extract_error_message(cause)
-            body_part = f"; body={body!r}" if body else ""
-            raise RemoteSignerError(
-                signer_url,
-                f"HTTP {cause.code} from signer{body_part}",
-                cause=cause,
-            ) from None
-
-        if isinstance(cause, ConnectionRefusedError):
+        if isinstance(cause, httpx.ConnectError):
             raise RemoteSignerError(
                 signer_url,
                 "connection refused (is the signer running? is the host/port correct?)",
                 cause=cause,
             ) from None
 
-        if isinstance(cause, URLError):
+        if isinstance(cause, httpx.HTTPError):
             raise RemoteSignerError(
                 signer_url,
-                f"failed to reach signer: {getattr(cause, 'reason', cause)}",
+                f"failed to reach signer: {cause}",
                 cause=cause,
             ) from None
 
@@ -139,7 +129,7 @@ def get_orch_info_sig(
 
         raise RemoteSignerError(
             signer_url,
-            f"unexpected error: {cause.__class__.__name__}: {cause}",
+            str(e),
             cause=cause if isinstance(cause, BaseException) else e,
         ) from None
 

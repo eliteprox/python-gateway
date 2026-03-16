@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import base64
-import ssl
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx
 
 from . import lp_rpc_pb2
 from .errors import PaymentError, SignerRefreshRequired
@@ -112,24 +111,24 @@ class BasePaymentSession:
     def _post_empty(self, url: str, headers: dict[str, str], *, op: str) -> None:
         from .orchestrator import _extract_error_message
 
-        req = Request(url, data=b"", headers=headers, method="POST")
-        ssl_ctx = ssl._create_unverified_context()
         try:
-            with urlopen(req, timeout=5.0, context=ssl_ctx) as resp:
-                resp.read()
-        except HTTPError as e:
-            body = _extract_error_message(e)
-            body_part = f"; body={body!r}" if body else ""
-            raise PaymentError(
-                f"HTTP {op} error: HTTP {e.code} from endpoint (url={url}){body_part}"
-            ) from e
-        except ConnectionRefusedError as e:
+            with httpx.Client(verify=False, timeout=5.0) as client:
+                resp = client.post(url, content=b"", headers=headers)
+            if resp.status_code >= 400:
+                body = _extract_error_message(resp)
+                body_part = f"; body={body!r}" if body else ""
+                raise PaymentError(
+                    f"HTTP {op} error: HTTP {resp.status_code} from endpoint (url={url}){body_part}"
+                )
+        except PaymentError:
+            raise
+        except httpx.ConnectError as e:
             raise PaymentError(
                 f"HTTP {op} error: connection refused (is the server running? is the host/port correct?) (url={url})"
             ) from e
-        except URLError as e:
+        except httpx.HTTPError as e:
             raise PaymentError(
-                f"HTTP {op} error: failed to reach endpoint: {getattr(e, 'reason', e)} (url={url})"
+                f"HTTP {op} error: failed to reach endpoint: {e} (url={url})"
             ) from e
         except Exception as e:
             raise PaymentError(
