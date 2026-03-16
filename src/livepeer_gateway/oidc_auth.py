@@ -2,9 +2,9 @@
 OAuth 2.0 Authorization Code Flow with PKCE for native/desktop applications,
 and Device Authorization Flow (RFC 8628) for CLI/IoT/headless environments.
 
-Implements RFC 8252 (OAuth 2.0 for Native Apps) using a loopback redirect
-with an ephemeral HTTP server, and RFC 8628 (Device Authorization Grant)
-for environments without a browser redirect.
+Uses httpx for HTTP transport and authlib for OAuth token helpers.
+All token requests include a ``resource`` parameter (RFC 8707) so the
+provider issues audience-bound JWT access tokens.
 
 Typical usage::
 
@@ -28,16 +28,15 @@ import logging
 import os
 import secrets
 import socket
-import ssl
 import threading
 import time
 import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
-from urllib.request import Request, urlopen
+
+import httpx
 
 _LOG = logging.getLogger(__name__)
 
@@ -58,6 +57,15 @@ DEFAULT_CLIENT_ID = "livepeer-sdk"
 DEFAULT_SCOPES = "openid profile gateway"
 _CALLBACK_PATH = "/callback"
 _AUTH_TIMEOUT_S = 300  # 5 minutes to complete browser login
+
+
+def _build_http_client() -> httpx.Client:
+    verify = not bool(os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"))
+    return httpx.Client(
+        timeout=15.0,
+        verify=verify,
+        headers={"Accept": "application/json"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +119,9 @@ def probe_oidc(base_url: str) -> bool:
     """Return True if the base URL exposes an OIDC discovery endpoint."""
     url = base_url.rstrip("/") + "/.well-known/openid-configuration"
     try:
-        req = Request(url, headers={"Accept": "application/json"})
-        ctx = ssl.create_default_context()
-        if os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"):
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        with urlopen(req, timeout=5, context=ctx) as resp:
-            return resp.status == 200
+        with _build_http_client() as client:
+            resp = client.get(url, timeout=5.0)
+            return resp.status_code == 200
     except Exception:
         return False
 
@@ -128,12 +132,10 @@ def probe_oidc(base_url: str) -> bool:
 
 def _generate_pkce() -> tuple[str, str]:
     """Return (code_verifier, code_challenge) using S256."""
+    import base64
     verifier = secrets.token_urlsafe(64)[:128]
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    # base64url-encode without padding
-    challenge = (
-        __import__("base64").urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    )
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return verifier, challenge
 
 
@@ -194,7 +196,7 @@ def _find_free_port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Core login flow
+# Core login flow (Authorization Code + PKCE)
 # ---------------------------------------------------------------------------
 
 def login(
@@ -217,7 +219,6 @@ def login(
     port = _find_free_port()
     redirect_uri = f"http://127.0.0.1:{port}{_CALLBACK_PATH}"
 
-    # Reset handler state
     _CallbackHandler.code = None
     _CallbackHandler.error = None
     _CallbackHandler.state = None
@@ -233,6 +234,7 @@ def login(
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        "resource": config.issuer,
     })
     authorize_url = f"{config.authorization_endpoint}?{auth_params}"
 
@@ -240,8 +242,6 @@ def login(
     print(f"\nOpening browser for login: {authorize_url}\n")
     webbrowser.open(authorize_url)
 
-    # Serve exactly one request (the callback)
-    # Run in a thread so we can enforce a timeout
     result: dict[str, Any] = {}
 
     def _serve() -> None:
@@ -274,13 +274,13 @@ def login(
     if received_state != state:
         raise _OIDCError("OAuth state mismatch — possible CSRF attack")
 
-    # Exchange code for tokens
     return _exchange_code(
         config.token_endpoint,
         code=code,
         redirect_uri=redirect_uri,
         client_id=client_id,
         code_verifier=verifier,
+        resource=config.issuer,
     )
 
 
@@ -304,8 +304,8 @@ def device_login(
     2. Display the user code and verification URL.
     3. Poll the token endpoint until the user authorizes or the code expires.
 
-    This is suitable for CLI tools, IoT devices, and environments without
-    a browser redirect (headless).
+    Includes ``resource`` parameter (RFC 8707) so the resulting access token
+    is a JWT with audience bound to the issuer.
     """
     config = discover(base_url)
 
@@ -315,27 +315,24 @@ def device_login(
             "The discovery document has no device_authorization_endpoint."
         )
 
-    # Step 1: Request device code
-    body = urlencode({
-        "client_id": client_id,
-        "scope": scopes,
-    }).encode("utf-8")
+    # Step 1: Request device code (with resource indicator)
+    with _build_http_client() as client:
+        resp = client.post(
+            config.device_authorization_endpoint,
+            data={
+                "client_id": client_id,
+                "scope": scopes,
+                "resource": config.issuer,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
-    req = Request(
-        config.device_authorization_endpoint,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-
-    try:
-        data = _urlopen_json(req)
-    except HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
+    if resp.status_code >= 400:
         raise _OIDCError(
-            f"Device authorization request failed (HTTP {e.code}): {err_body}"
-        ) from e
+            f"Device authorization request failed (HTTP {resp.status_code}): {resp.text}"
+        )
 
+    data = resp.json()
     device_code = data["device_code"]
     user_code = data["user_code"]
     verification_uri = _ensure_https_for_display(data.get("verification_uri", ""))
@@ -357,48 +354,45 @@ def device_login(
     print(f"\n  Code expires in {expires_in // 60} minutes.")
     print("=" * 50 + "\n")
 
-    # Step 3: Poll for completion
+    # Step 3: Poll for completion (with resource indicator)
     deadline = time.time() + min(expires_in, _DEVICE_POLL_TIMEOUT_S)
     poll_interval = interval
 
-    while time.time() < deadline:
-        time.sleep(poll_interval)
+    with _build_http_client() as client:
+        while time.time() < deadline:
+            time.sleep(poll_interval)
 
-        poll_body = urlencode({
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "client_id": client_id,
-            "device_code": device_code,
-        }).encode("utf-8")
-
-        poll_req = Request(
-            config.token_endpoint,
-            data=poll_body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
-        try:
-            token_data = _urlopen_json(poll_req)
-            # Success — we got tokens
-            expires_at = None
-            if "expires_in" in token_data:
-                expires_at = time.time() + int(token_data["expires_in"])
-
-            _LOG.info("Device authorized successfully")
-            return TokenSet(
-                access_token=token_data["access_token"],
-                refresh_token=token_data.get("refresh_token"),
-                id_token=token_data.get("id_token"),
-                expires_at=expires_at,
+            resp = client.post(
+                config.token_endpoint,
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "client_id": client_id,
+                    "device_code": device_code,
+                    "resource": config.issuer,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
-        except HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")
+
+            if resp.status_code == 200:
+                token_data = resp.json()
+                expires_at = None
+                if "expires_in" in token_data:
+                    expires_at = time.time() + int(token_data["expires_in"])
+
+                _LOG.info("Device authorized successfully")
+                return TokenSet(
+                    access_token=token_data["access_token"],
+                    refresh_token=token_data.get("refresh_token"),
+                    id_token=token_data.get("id_token"),
+                    expires_at=expires_at,
+                )
+
             try:
-                err_data = json.loads(err_body)
-            except json.JSONDecodeError:
+                err_data = resp.json()
+            except Exception:
                 raise _OIDCError(
-                    f"Token poll failed (HTTP {e.code}): {err_body}"
-                ) from e
+                    f"Token poll failed (HTTP {resp.status_code}): {resp.text}"
+                )
 
             error = err_data.get("error", "")
 
@@ -436,6 +430,7 @@ def refresh(
         config.token_endpoint,
         refresh_token=refresh_token,
         client_id=client_id,
+        resource=config.issuer,
     )
 
 
@@ -450,15 +445,16 @@ def _exchange_code(
     redirect_uri: str,
     client_id: str,
     code_verifier: str,
+    resource: str,
 ) -> TokenSet:
-    body = urlencode({
+    return _token_request(token_endpoint, {
         "grant_type": "authorization_code",
         "client_id": client_id,
         "code": code,
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
-    }).encode("utf-8")
-    return _token_request(token_endpoint, body)
+        "resource": resource,
+    })
 
 
 def _exchange_refresh(
@@ -466,29 +462,28 @@ def _exchange_refresh(
     *,
     refresh_token: str,
     client_id: str,
+    resource: str,
 ) -> TokenSet:
-    body = urlencode({
+    return _token_request(token_endpoint, {
         "grant_type": "refresh_token",
         "client_id": client_id,
         "refresh_token": refresh_token,
-    }).encode("utf-8")
-    return _token_request(token_endpoint, body)
+        "resource": resource,
+    })
 
 
-def _token_request(token_endpoint: str, body: bytes) -> TokenSet:
-    req = Request(
-        token_endpoint,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
+def _token_request(token_endpoint: str, params: dict[str, str]) -> TokenSet:
+    with _build_http_client() as client:
+        resp = client.post(
+            token_endpoint,
+            data=params,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
-    try:
-        data = _urlopen_json(req)
-    except HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise _OIDCError(f"Token exchange failed (HTTP {e.code}): {err_body}") from e
+    if resp.status_code >= 400:
+        raise _OIDCError(f"Token exchange failed (HTTP {resp.status_code}): {resp.text}")
 
+    data = resp.json()
     expires_at = None
     if "expires_in" in data:
         expires_at = time.time() + int(data["expires_in"])
@@ -511,12 +506,21 @@ def _cache_dir() -> Path:
     return base / "livepeer-gateway" / "tokens"
 
 
-def _cache_key(base_url: str, client_id: str = DEFAULT_CLIENT_ID, scopes: str = DEFAULT_SCOPES) -> str:
+def _cache_key(
+    base_url: str,
+    client_id: str = DEFAULT_CLIENT_ID,
+    scopes: str = DEFAULT_SCOPES,
+) -> str:
     key_material = f"{base_url}|{client_id}|{scopes}"
     return hashlib.sha256(key_material.encode()).hexdigest()[:16]
 
 
-def load_cached_token(base_url: str, *, client_id: str = DEFAULT_CLIENT_ID, scopes: str = DEFAULT_SCOPES) -> Optional[TokenSet]:
+def load_cached_token(
+    base_url: str,
+    *,
+    client_id: str = DEFAULT_CLIENT_ID,
+    scopes: str = DEFAULT_SCOPES,
+) -> Optional[TokenSet]:
     """Load a cached token set for the given base URL."""
     path = _cache_dir() / f"{_cache_key(base_url, client_id, scopes)}.json"
     if not path.exists():
@@ -529,19 +533,29 @@ def load_cached_token(base_url: str, *, client_id: str = DEFAULT_CLIENT_ID, scop
         return None
 
 
-def save_cached_token(base_url: str, tokens: TokenSet, *, client_id: str = DEFAULT_CLIENT_ID, scopes: str = DEFAULT_SCOPES) -> None:
+def save_cached_token(
+    base_url: str,
+    tokens: TokenSet,
+    *,
+    client_id: str = DEFAULT_CLIENT_ID,
+    scopes: str = DEFAULT_SCOPES,
+) -> None:
     """Persist a token set to the cache directory."""
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / f"{_cache_key(base_url, client_id, scopes)}.json"
-    # Write atomically: restricted permissions (owner-only)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(tokens)), "utf-8")
     os.chmod(tmp, 0o600)
     tmp.rename(path)
 
 
-def clear_cached_token(base_url: str, *, client_id: str = DEFAULT_CLIENT_ID, scopes: str = DEFAULT_SCOPES) -> None:
+def clear_cached_token(
+    base_url: str,
+    *,
+    client_id: str = DEFAULT_CLIENT_ID,
+    scopes: str = DEFAULT_SCOPES,
+) -> None:
     """Remove the cached token for the given base URL."""
     path = _cache_dir() / f"{_cache_key(base_url, client_id, scopes)}.json"
     path.unlink(missing_ok=True)
@@ -576,16 +590,15 @@ def ensure_valid_token(
     Return a valid access token, using cache/refresh/login as needed.
 
     1. Load cached token set for this base URL.
-    2. If valid and not expired → return it.
-    3. If expired but has a refresh token → try to refresh.
-    4. Otherwise → run interactive login:
+    2. If valid and not expired -> return it.
+    3. If expired but has a refresh token -> try to refresh.
+    4. Otherwise -> run interactive login:
        - By default, uses Device Authorization Flow (RFC 8628).
-         Suitable for CLI tools, IoT devices, and headless environments.
        - If ``headless=False``, use browser-based Authorization Code + PKCE flow.
 
-    The resulting tokens are always cached before returning.
+    All token requests include ``resource`` (RFC 8707) so access tokens are
+    audience-bound JWTs.
     """
-    # Env var overrides: LIVEPEER_AUTH_BROWSER=1 forces browser mode
     if headless and os.environ.get("LIVEPEER_AUTH_BROWSER", "").lower() in ("1", "true", "yes"):
         headless = False
 
@@ -599,7 +612,6 @@ def ensure_valid_token(
         _LOG.info("Access token expired, refreshing...")
         try:
             tokens = refresh(base_url, cached.refresh_token, client_id=client_id)
-            # Preserve the old refresh token if the server didn't issue a new one
             if not tokens.refresh_token and cached.refresh_token:
                 tokens = TokenSet(
                     access_token=tokens.access_token,
@@ -623,27 +635,15 @@ def ensure_valid_token(
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers (stdlib only)
+# HTTP helpers (httpx)
 # ---------------------------------------------------------------------------
 
 def _get_json(url: str) -> Any:
-    req = Request(url, headers={"Accept": "application/json"})
-    return _urlopen_json(req)
-
-
-def _urlopen_json(req: Request) -> Any:
-    ctx = ssl.create_default_context()
-    # Allow self-signed certs for local dev
-    if os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"):
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with urlopen(req, timeout=15, context=ctx) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except HTTPError:
-        raise
-    except URLError as e:
-        raise _OIDCError(f"Failed to reach {req.full_url}: {e.reason}") from e
+    with _build_http_client() as client:
+        resp = client.get(url)
+    if resp.status_code >= 400:
+        raise _OIDCError(f"HTTP {resp.status_code} from {url}: {resp.text}")
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------

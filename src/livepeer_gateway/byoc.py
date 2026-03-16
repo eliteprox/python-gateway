@@ -5,12 +5,11 @@ import base64
 import binascii
 import json
 import logging
-import ssl
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx
 
 from .byoc_payments import BYOCPaymentSession
 from .capabilities import CapabilityId, build_capabilities
@@ -325,32 +324,32 @@ def _post_byoc_start(
         "User-Agent": "livepeer-python-gateway/0.1",
     }
     req_headers.update(headers)
-    req = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=req_headers,
-        method="POST",
-    )
-    ssl_ctx = ssl._create_unverified_context()
 
     try:
-        with urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
-            raw_body = resp.read().decode("utf-8", errors="replace")
-            response_headers = dict(resp.headers.items())
-            status = resp.status
-    except HTTPError as e:
-        body = _extract_error_message(e)
-        body_part = f"; body={body!r}" if body else ""
-        raise LivepeerGatewayError(
-            f"HTTP BYOC start error: HTTP {e.code} from endpoint (url={url}){body_part}"
-        ) from e
-    except ConnectionRefusedError as e:
+        with httpx.Client(verify=False, timeout=timeout) as client:
+            resp = client.post(
+                url,
+                content=json.dumps(payload).encode("utf-8"),
+                headers=req_headers,
+            )
+        if resp.status_code >= 400:
+            body = _extract_error_message(resp)
+            body_part = f"; body={body!r}" if body else ""
+            raise LivepeerGatewayError(
+                f"HTTP BYOC start error: HTTP {resp.status_code} from endpoint (url={url}){body_part}"
+            )
+        raw_body = resp.text
+        response_headers = dict(resp.headers.items())
+        status = resp.status_code
+    except LivepeerGatewayError:
+        raise
+    except httpx.ConnectError as e:
         raise LivepeerGatewayError(
             f"HTTP BYOC start error: connection refused (is the server running? is the host/port correct?) (url={url})"
         ) from e
-    except URLError as e:
+    except httpx.HTTPError as e:
         raise LivepeerGatewayError(
-            f"HTTP BYOC start error: failed to reach endpoint: {getattr(e, 'reason', e)} (url={url})"
+            f"HTTP BYOC start error: failed to reach endpoint: {e} (url={url})"
         ) from e
     except Exception as e:
         raise LivepeerGatewayError(
