@@ -33,7 +33,7 @@ import time
 import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -296,6 +296,7 @@ def device_login(
     *,
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
+    on_device_auth: Optional[Callable[[str, str, int], None]] = None,
 ) -> TokenSet:
     """
     Run the Device Authorization Flow (RFC 8628).
@@ -341,6 +342,12 @@ def device_login(
     interval = int(data.get("interval", 5))
 
     # Step 2: Display instructions to user
+    auth_url = verification_uri_complete or verification_uri
+    if on_device_auth:
+        try:
+            on_device_auth(auth_url, user_code, expires_in)
+        except Exception:
+            _LOG.warning("on_device_auth callback failed", exc_info=True)
     print("\n" + "=" * 50)
     print("  DEVICE AUTHORIZATION")
     print("=" * 50)
@@ -585,6 +592,7 @@ def ensure_valid_token(
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
     headless: bool = True,
+    on_device_auth: Optional[Callable[[str, str, int], None]] = None,
 ) -> TokenSet:
     """
     Return a valid access token, using cache/refresh/login as needed.
@@ -626,7 +634,12 @@ def ensure_valid_token(
 
     if headless:
         _LOG.info("Starting OIDC device authorization flow for %s", base_url)
-        tokens = device_login(base_url, client_id=client_id, scopes=scopes)
+        tokens = device_login(
+            base_url,
+            client_id=client_id,
+            scopes=scopes,
+            on_device_auth=on_device_auth,
+        )
     else:
         _LOG.info("Starting OIDC browser login for %s", base_url)
         tokens = login(base_url, client_id=client_id, scopes=scopes)
