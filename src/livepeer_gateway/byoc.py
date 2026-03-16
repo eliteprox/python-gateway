@@ -413,6 +413,12 @@ def start_byoc_job(
         resolved_discovery_url,
         **billing_kwargs,
     )
+    if (
+        resolved_discovery_url is not None
+        and resolved_discovery_headers is None
+        and resolved_signer_headers is not None
+    ):
+        resolved_discovery_headers = resolved_signer_headers
 
     capabilities = build_capabilities(CapabilityId.BYOC, req.capability.strip())
     cursor = orchestrator_selector(
