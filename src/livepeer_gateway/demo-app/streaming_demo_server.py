@@ -43,6 +43,7 @@ if _REPO_SRC not in sys.path:
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
 from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.oidc_auth import DEFAULT_SCOPES, clear_cached_token
 
 _LOG = logging.getLogger("streaming_demo")
 
@@ -200,6 +201,17 @@ async def ws_stream(request: web.Request) -> web.WebSocketResponse:
         _LOG.info("[%s] Starting LV2V job...", session_id)
         await ws.send_str(json.dumps({"type": "status", "status": "starting_job"}))
 
+        loop = asyncio.get_running_loop()
+
+        def on_device_auth(url: str, user_code: str, expires_in: int) -> None:
+            msg = json.dumps({
+                "type": "device_auth",
+                "url": url,
+                "user_code": user_code,
+                "expires_in": expires_in,
+            })
+            asyncio.run_coroutine_threadsafe(ws.send_str(msg), loop)
+
         job = await asyncio.to_thread(
             start_lv2v,
             None,
@@ -207,6 +219,7 @@ async def ws_stream(request: web.Request) -> web.WebSocketResponse:
             billing_url=BILLING_URL,
             client_id=CLIENT_ID,
             headless=True,
+            on_device_auth=on_device_auth,
         )
         session.job = job
         _LOG.info("[%s] Job started  publish=%s  subscribe=%s", session_id, job.publish_url, job.subscribe_url)
@@ -288,6 +301,25 @@ async def health(request: web.Request) -> web.Response:
     })
 
 
+async def logout(request: web.Request) -> web.Response:
+    """Clear cached OIDC tokens for pymthouse.com. Next Start will prompt for login."""
+    try:
+        await asyncio.to_thread(
+            clear_cached_token,
+            BILLING_URL.rstrip("/"),
+            client_id=CLIENT_ID,
+            scopes=DEFAULT_SCOPES,
+        )
+        _LOG.info("Logged out: cleared cached token for %s", BILLING_URL)
+        return web.json_response({"status": "ok", "message": "Logged out. Cached tokens cleared."})
+    except Exception as exc:
+        _LOG.warning("Logout failed: %s", exc)
+        return web.json_response(
+            {"status": "error", "message": str(exc)},
+            status=500,
+        )
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -298,6 +330,7 @@ def create_app(model: str = DEFAULT_MODEL, fps: float = DEFAULT_FPS) -> web.Appl
     app["default_fps"] = fps
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_post("/api/logout", logout)
     app.router.add_get("/ws/stream", ws_stream)
     return app
 
