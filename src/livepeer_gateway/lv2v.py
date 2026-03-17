@@ -62,7 +62,7 @@ def _resolve_billing(
             on_device_auth=on_device_auth,
         )
         resolved_signer = f"{base}/api/signer"
-        resolved_headers = {"Authorization": f"Bearer {tokens.access_token}"}
+        resolved_headers = {"Authorization": f"Bearer {tokens['access_token']}"}
         resolved_discovery = discovery_url or f"{base}/api/signer/discover-orchestrators"
         return resolved_signer, resolved_headers, resolved_discovery
 

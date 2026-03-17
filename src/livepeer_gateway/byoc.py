@@ -100,7 +100,7 @@ def _resolve_billing(
     if probe_oidc(base):
         tokens = ensure_valid_token(base, client_id=client_id, scopes=scopes, headless=headless)
         resolved_signer = f"{base}/api/signer"
-        resolved_headers = {"Authorization": f"Bearer {tokens.access_token}"}
+        resolved_headers = {"Authorization": f"Bearer {tokens['access_token']}"}
         resolved_discovery = discovery_url or f"{base}/api/signer/discover-orchestrators"
         return resolved_signer, resolved_headers, resolved_discovery
 

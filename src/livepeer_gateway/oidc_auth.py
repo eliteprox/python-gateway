@@ -2,7 +2,7 @@
 OAuth 2.0 Authorization Code Flow with PKCE for native/desktop applications,
 and Device Authorization Flow (RFC 8628) for CLI/IoT/headless environments.
 
-Uses httpx for HTTP transport and authlib for OAuth token helpers.
+Uses authlib's OAuth2Client for OAuth client behavior and HTTP transport.
 All token requests include a ``resource`` parameter (RFC 8707) so the
 provider issues audience-bound JWT access tokens.
 
@@ -16,7 +16,7 @@ Typical usage::
     # Headless / Device flow (CLI, IoT, smart TV)
     tokens = ensure_valid_token("https://pymthouse.example.com", headless=True)
 
-    signer_headers = {"Authorization": f"Bearer {tokens.access_token}"}
+    signer_headers = {"Authorization": f"Bearer {tokens['access_token']}"}
 """
 
 from __future__ import annotations
@@ -26,17 +26,18 @@ import http.server
 import json
 import logging
 import os
-import secrets
 import socket
 import threading
 import time
 import webbrowser
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlparse
 
-import httpx
+from authlib.common.security import generate_token
+from authlib.integrations.httpx_client import OAuth2Client
+from authlib.oauth2.auth import OAuth2Token
 
 _LOG = logging.getLogger(__name__)
 
@@ -59,15 +60,6 @@ _CALLBACK_PATH = "/callback"
 _AUTH_TIMEOUT_S = 300  # 5 minutes to complete browser login
 
 
-def _build_http_client() -> httpx.Client:
-    verify = not bool(os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"))
-    return httpx.Client(
-        timeout=15.0,
-        verify=verify,
-        headers={"Accept": "application/json"},
-    )
-
-
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
@@ -83,18 +75,29 @@ class OIDCConfig:
     device_authorization_endpoint: Optional[str] = None
 
 
-@dataclass
-class TokenSet:
-    """Tokens obtained from the OIDC provider."""
-    access_token: str
-    refresh_token: Optional[str] = None
-    id_token: Optional[str] = None
-    expires_at: Optional[float] = None  # epoch seconds
+def _oauth_verify() -> bool:
+    return not bool(os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"))
 
-    def is_expired(self, margin_s: float = 60.0) -> bool:
-        if self.expires_at is None:
-            return False
-        return time.time() >= (self.expires_at - margin_s)
+
+def _build_oauth2_client(
+    *,
+    client_id: Optional[str] = None,
+    scopes: Optional[str] = None,
+    redirect_uri: Optional[str] = None,
+    token: Optional[dict[str, Any]] = None,
+    code_challenge_method: Optional[str] = None,
+) -> OAuth2Client:
+    return OAuth2Client(
+        client_id=client_id,
+        scope=scopes,
+        redirect_uri=redirect_uri,
+        token=token,
+        token_endpoint_auth_method="none",
+        code_challenge_method=code_challenge_method,
+        timeout=15.0,
+        verify=_oauth_verify(),
+        headers={"Accept": "application/json"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +107,11 @@ class TokenSet:
 def discover(base_url: str) -> OIDCConfig:
     """Fetch and parse the OIDC discovery document."""
     url = base_url.rstrip("/") + "/.well-known/openid-configuration"
-    data = _get_json(url)
+    with _build_oauth2_client() as client:
+        resp = client.request("GET", url, withhold_token=True)
+    if resp.status_code >= 400:
+        raise _OIDCError(f"HTTP {resp.status_code} from {url}: {resp.text}")
+    data = resp.json()
     return OIDCConfig(
         issuer=data["issuer"],
         authorization_endpoint=data["authorization_endpoint"],
@@ -119,24 +126,11 @@ def probe_oidc(base_url: str) -> bool:
     """Return True if the base URL exposes an OIDC discovery endpoint."""
     url = base_url.rstrip("/") + "/.well-known/openid-configuration"
     try:
-        with _build_http_client() as client:
-            resp = client.get(url, timeout=5.0)
+        with _build_oauth2_client() as client:
+            resp = client.request("GET", url, withhold_token=True, timeout=5.0)
             return resp.status_code == 200
     except Exception:
         return False
-
-
-# ---------------------------------------------------------------------------
-# PKCE helpers
-# ---------------------------------------------------------------------------
-
-def _generate_pkce() -> tuple[str, str]:
-    """Return (code_verifier, code_challenge) using S256."""
-    import base64
-    verifier = secrets.token_urlsafe(64)[:128]
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +198,7 @@ def login(
     *,
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
-) -> TokenSet:
+) -> OAuth2Token:
     """
     Run the full OAuth 2.0 Authorization Code + PKCE flow.
 
@@ -214,8 +208,7 @@ def login(
     4. Exchange the code for tokens at the token endpoint.
     """
     config = discover(base_url)
-    verifier, challenge = _generate_pkce()
-    state = secrets.token_urlsafe(32)
+    code_verifier = generate_token(48)
     port = _find_free_port()
     redirect_uri = f"http://127.0.0.1:{port}{_CALLBACK_PATH}"
 
@@ -226,62 +219,65 @@ def login(
     server = http.server.HTTPServer(("127.0.0.1", port), _CallbackHandler)
     server.timeout = _AUTH_TIMEOUT_S
 
-    auth_params = urlencode({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": scopes,
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "resource": config.issuer,
-    })
-    authorize_url = f"{config.authorization_endpoint}?{auth_params}"
-
-    _LOG.info("Opening browser for OIDC login...")
-    print(f"\nOpening browser for login: {authorize_url}\n")
-    webbrowser.open(authorize_url)
-
-    result: dict[str, Any] = {}
-
-    def _serve() -> None:
-        try:
-            server.handle_request()
-            result["code"] = _CallbackHandler.code
-            result["error"] = _CallbackHandler.error
-            result["state"] = _CallbackHandler.state
-        except Exception as exc:
-            result["error"] = str(exc)
-        finally:
-            server.server_close()
-
-    thread = threading.Thread(target=_serve, daemon=True)
-    thread.start()
-    thread.join(timeout=_AUTH_TIMEOUT_S)
-
-    if thread.is_alive():
-        server.server_close()
-        raise _OIDCError("Login timed out — no callback received within 5 minutes")
-
-    if result.get("error"):
-        raise _OIDCError(f"Authorization failed: {result['error']}")
-
-    code = result.get("code")
-    if not code:
-        raise _OIDCError("No authorization code received")
-
-    received_state = result.get("state")
-    if received_state != state:
-        raise _OIDCError("OAuth state mismatch — possible CSRF attack")
-
-    return _exchange_code(
-        config.token_endpoint,
-        code=code,
-        redirect_uri=redirect_uri,
+    with _build_oauth2_client(
         client_id=client_id,
-        code_verifier=verifier,
-        resource=config.issuer,
-    )
+        scopes=scopes,
+        redirect_uri=redirect_uri,
+        code_challenge_method="S256",
+    ) as client:
+        authorize_url, state = client.create_authorization_url(
+            config.authorization_endpoint,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+            resource=config.issuer,
+        )
+
+        _LOG.info("Opening browser for OIDC login...")
+        print(f"\nOpening browser for login: {authorize_url}\n")
+        webbrowser.open(authorize_url)
+
+        result: dict[str, Any] = {}
+
+        def _serve() -> None:
+            try:
+                server.handle_request()
+                result["code"] = _CallbackHandler.code
+                result["error"] = _CallbackHandler.error
+                result["state"] = _CallbackHandler.state
+            except Exception as exc:
+                result["error"] = str(exc)
+            finally:
+                server.server_close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        thread.join(timeout=_AUTH_TIMEOUT_S)
+
+        if thread.is_alive():
+            server.server_close()
+            raise _OIDCError("Login timed out — no callback received within 5 minutes")
+
+        if result.get("error"):
+            raise _OIDCError(f"Authorization failed: {result['error']}")
+
+        code = result.get("code")
+        if not code:
+            raise _OIDCError("No authorization code received")
+
+        received_state = result.get("state")
+        authorization_response = f"{redirect_uri}?code={code}&state={received_state}"
+
+        try:
+            return client.fetch_token(
+                config.token_endpoint,
+                authorization_response=authorization_response,
+                code_verifier=code_verifier,
+                redirect_uri=redirect_uri,
+                resource=config.issuer,
+                state=state,
+            )
+        except Exception as exc:
+            raise _OIDCError(f"Token exchange failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +293,7 @@ def device_login(
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
     on_device_auth: Optional[Callable[[str, str, int], None]] = None,
-) -> TokenSet:
+) -> OAuth2Token:
     """
     Run the Device Authorization Flow (RFC 8628).
 
@@ -317,9 +313,11 @@ def device_login(
         )
 
     # Step 1: Request device code (with resource indicator)
-    with _build_http_client() as client:
-        resp = client.post(
+    with _build_oauth2_client(client_id=client_id, scopes=scopes) as client:
+        resp = client.request(
+            "POST",
             config.device_authorization_endpoint,
+            withhold_token=True,
             data={
                 "client_id": client_id,
                 "scope": scopes,
@@ -365,12 +363,14 @@ def device_login(
     deadline = time.time() + min(expires_in, _DEVICE_POLL_TIMEOUT_S)
     poll_interval = interval
 
-    with _build_http_client() as client:
+    with _build_oauth2_client(client_id=client_id, scopes=scopes) as client:
         while time.time() < deadline:
             time.sleep(poll_interval)
 
-            resp = client.post(
+            resp = client.request(
+                "POST",
                 config.token_endpoint,
+                withhold_token=True,
                 data={
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "client_id": client_id,
@@ -381,18 +381,8 @@ def device_login(
             )
 
             if resp.status_code == 200:
-                token_data = resp.json()
-                expires_at = None
-                if "expires_in" in token_data:
-                    expires_at = time.time() + int(token_data["expires_in"])
-
                 _LOG.info("Device authorized successfully")
-                return TokenSet(
-                    access_token=token_data["access_token"],
-                    refresh_token=token_data.get("refresh_token"),
-                    id_token=token_data.get("id_token"),
-                    expires_at=expires_at,
-                )
+                return OAuth2Token.from_dict(resp.json())
 
             try:
                 err_data = resp.json()
@@ -430,77 +420,21 @@ def refresh(
     refresh_token: str,
     *,
     client_id: str = DEFAULT_CLIENT_ID,
-) -> TokenSet:
+) -> OAuth2Token:
     """Exchange a refresh token for a new token set."""
     config = discover(base_url)
-    return _exchange_refresh(
-        config.token_endpoint,
-        refresh_token=refresh_token,
+    with _build_oauth2_client(
         client_id=client_id,
-        resource=config.issuer,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Token exchange helpers
-# ---------------------------------------------------------------------------
-
-def _exchange_code(
-    token_endpoint: str,
-    *,
-    code: str,
-    redirect_uri: str,
-    client_id: str,
-    code_verifier: str,
-    resource: str,
-) -> TokenSet:
-    return _token_request(token_endpoint, {
-        "grant_type": "authorization_code",
-        "client_id": client_id,
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "code_verifier": code_verifier,
-        "resource": resource,
-    })
-
-
-def _exchange_refresh(
-    token_endpoint: str,
-    *,
-    refresh_token: str,
-    client_id: str,
-    resource: str,
-) -> TokenSet:
-    return _token_request(token_endpoint, {
-        "grant_type": "refresh_token",
-        "client_id": client_id,
-        "refresh_token": refresh_token,
-        "resource": resource,
-    })
-
-
-def _token_request(token_endpoint: str, params: dict[str, str]) -> TokenSet:
-    with _build_http_client() as client:
-        resp = client.post(
-            token_endpoint,
-            data=params,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-    if resp.status_code >= 400:
-        raise _OIDCError(f"Token exchange failed (HTTP {resp.status_code}): {resp.text}")
-
-    data = resp.json()
-    expires_at = None
-    if "expires_in" in data:
-        expires_at = time.time() + int(data["expires_in"])
-
-    return TokenSet(
-        access_token=data["access_token"],
-        refresh_token=data.get("refresh_token"),
-        id_token=data.get("id_token"),
-        expires_at=expires_at,
-    )
+        token={"refresh_token": refresh_token},
+    ) as client:
+        try:
+            return client.refresh_token(
+                config.token_endpoint,
+                refresh_token=refresh_token,
+                resource=config.issuer,
+            )
+        except Exception as exc:
+            raise _OIDCError(f"Refresh failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -527,14 +461,14 @@ def load_cached_token(
     *,
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
-) -> Optional[TokenSet]:
+) -> Optional[OAuth2Token]:
     """Load a cached token set for the given base URL."""
     path = _cache_dir() / f"{_cache_key(base_url, client_id, scopes)}.json"
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text("utf-8"))
-        return TokenSet(**data)
+        return OAuth2Token.from_dict(data)
     except Exception:
         _LOG.debug("Failed to load cached token from %s", path, exc_info=True)
         return None
@@ -542,7 +476,7 @@ def load_cached_token(
 
 def save_cached_token(
     base_url: str,
-    tokens: TokenSet,
+    tokens: OAuth2Token,
     *,
     client_id: str = DEFAULT_CLIENT_ID,
     scopes: str = DEFAULT_SCOPES,
@@ -552,7 +486,7 @@ def save_cached_token(
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / f"{_cache_key(base_url, client_id, scopes)}.json"
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(asdict(tokens)), "utf-8")
+    tmp.write_text(json.dumps(dict(tokens)), "utf-8")
     os.chmod(tmp, 0o600)
     tmp.rename(path)
 
@@ -593,7 +527,7 @@ def ensure_valid_token(
     scopes: str = DEFAULT_SCOPES,
     headless: bool = True,
     on_device_auth: Optional[Callable[[str, str, int], None]] = None,
-) -> TokenSet:
+) -> OAuth2Token:
     """
     Return a valid access token, using cache/refresh/login as needed.
 
@@ -616,17 +550,10 @@ def ensure_valid_token(
         _LOG.debug("Using cached OIDC token for %s", base_url)
         return cached
 
-    if cached and cached.refresh_token:
+    if cached and cached.get("refresh_token"):
         _LOG.info("Access token expired, refreshing...")
         try:
-            tokens = refresh(base_url, cached.refresh_token, client_id=client_id)
-            if not tokens.refresh_token and cached.refresh_token:
-                tokens = TokenSet(
-                    access_token=tokens.access_token,
-                    refresh_token=cached.refresh_token,
-                    id_token=tokens.id_token,
-                    expires_at=tokens.expires_at,
-                )
+            tokens = refresh(base_url, cached["refresh_token"], client_id=client_id)
             save_cached_token(base_url, tokens, client_id=client_id, scopes=scopes)
             return tokens
         except Exception:
@@ -645,18 +572,6 @@ def ensure_valid_token(
         tokens = login(base_url, client_id=client_id, scopes=scopes)
     save_cached_token(base_url, tokens, client_id=client_id, scopes=scopes)
     return tokens
-
-
-# ---------------------------------------------------------------------------
-# HTTP helpers (httpx)
-# ---------------------------------------------------------------------------
-
-def _get_json(url: str) -> Any:
-    with _build_http_client() as client:
-        resp = client.get(url)
-    if resp.status_code >= 400:
-        raise _OIDCError(f"HTTP {resp.status_code} from {url}: {resp.text}")
-    return resp.json()
 
 
 # ---------------------------------------------------------------------------
