@@ -66,7 +66,6 @@ async def main() -> None:
             billing_url=args.billing_url,
             client_id=args.client_id,
             headless=not args.browser,
-            control_config=control_config,
         )
 
         print("=== LiveVideoToVideo ===")
