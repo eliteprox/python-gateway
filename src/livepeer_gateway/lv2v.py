@@ -292,6 +292,7 @@ def start_lv2v(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    timeout: float = 5.0,
 ) -> LiveVideoToVideo:
     """
     Start a live video-to-video job.
@@ -312,6 +313,10 @@ def start_lv2v(
     2) explicit ``discovery_url`` argument
     3) token ``discovery`` value
     4) remote signer discovery endpoint derived from the resolved signer URL
+
+    ``timeout`` controls only the initial HTTP POST to
+    ``/live-video-to-video`` after an orchestrator has been selected.
+    Discovery and ``GetOrchestrator`` calls use their own timeouts.
     """
     if not req.model_id:
         raise LivepeerGatewayError("start_lv2v requires model_id")
@@ -374,7 +379,7 @@ def start_lv2v(
 
             base = _http_origin(info.transcoder)
             url = f"{base}/live-video-to-video"
-            data = post_json(url, req.to_json(), headers=headers)
+            data = post_json(url, req.to_json(), headers=headers, timeout=timeout)
             job = LiveVideoToVideo.from_json(
                 data,
                 orchestrator_info=info,

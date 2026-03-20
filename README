@@ -73,6 +73,7 @@ job = start_lv2v(
     orch_url=None,
     req=StartJobRequest(model_id="noop"),
     token=token,
+    timeout=5.0,  # timeout for the initial /live-video-to-video request
     # signer_url="https://override-signer.example.com",  # explicit args take precedence
 )
 ```
