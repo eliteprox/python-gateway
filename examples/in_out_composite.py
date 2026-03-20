@@ -6,6 +6,7 @@ of input, loopback, output, and an empty tile with latency overlays.
 import argparse
 import asyncio
 from collections import deque
+from dataclasses import asdict
 import logging
 import queue
 import threading
@@ -201,6 +202,9 @@ async def main() -> None:
     output_task: Optional[asyncio.Task[None]] = None
     loopback_task: Optional[asyncio.Task[None]] = None
     display_task: Optional[asyncio.Task[None]] = None
+    media = None
+    output_stream: Optional[MediaOutput] = None
+    loopback_stream: Optional[MediaOutput] = None
 
     latest = {
         "cam_img": None,
@@ -256,9 +260,11 @@ async def main() -> None:
             latest["loop_fps"] = _push_fps(loop_frame_times, time.monotonic())
 
     async def _subscribe_output() -> None:
+        nonlocal output_stream
         if job is None:
             return
         async with job.media_output() as output:
+            output_stream = output
             async for decoded in output.frames():
                 if stop_async.is_set():
                     break
@@ -271,9 +277,11 @@ async def main() -> None:
                 _update_out(img, decoded.pts_time)
 
     async def _subscribe_loopback() -> None:
+        nonlocal loopback_stream
         if job is None or not job.publish_url:
             return
         async with MediaOutput(job.publish_url) as loopback:
+            loopback_stream = loopback
             async for decoded in loopback.frames():
                 if stop_async.is_set():
                     break
@@ -463,6 +471,21 @@ async def main() -> None:
                 input_.close()
             except Exception:
                 pass
+        if media is not None:
+            media_stats = media.get_stats()
+            print("\nMedia publish stats:")
+            print(media_stats)
+            print(asdict(media_stats))
+        if output_stream is not None:
+            output_stats = output_stream.get_stats()
+            print("\nOutput stream stats:")
+            print(output_stats)
+            print(asdict(output_stats))
+        if loopback_stream is not None:
+            loopback_stats = loopback_stream.get_stats()
+            print("\nLoopback stream stats:")
+            print(loopback_stats)
+            print(asdict(loopback_stats))
         if job is not None:
             try:
                 await job.close()

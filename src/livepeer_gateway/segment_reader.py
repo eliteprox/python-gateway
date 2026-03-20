@@ -15,6 +15,25 @@ class AsyncByteSource(Protocol):
     """
     async def read(self, n: int) -> bytes: ...
 
+@dataclass(frozen=True)
+class SegmentReaderStats:
+    chunks_read: int
+    bytes_read: int
+    read_errors: int
+    max_bytes_exceeded: int
+    segment_seq: int
+
+    def __str__(self) -> str:
+        return (
+            "SegmentReaderStats("
+            f"segment_seq={self.segment_seq}, "
+            f"chunks_read={self.chunks_read}, "
+            f"bytes_read={self.bytes_read}, "
+            f"read_errors={self.read_errors}, "
+            f"max_bytes_exceeded={self.max_bytes_exceeded}"
+            ")"
+        )
+
 
 @dataclass
 class _SegmentBuffer:
@@ -203,7 +222,12 @@ class SegmentReader:
             self.response.release()
             self.response.close()
 
-    def get_stats(self) -> dict:
-        stats = dict(self._writer._stats)
-        stats["segment_seq"] = self.seq()
-        return stats
+    def get_stats(self) -> SegmentReaderStats:
+        stats = self._writer._stats
+        return SegmentReaderStats(
+            chunks_read=stats["chunks_read"],
+            bytes_read=stats["bytes_read"],
+            read_errors=stats["read_errors"],
+            max_bytes_exceeded=stats["max_bytes_exceeded"],
+            segment_seq=self.seq(),
+        )

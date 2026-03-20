@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 from typing import Optional
@@ -11,6 +12,33 @@ from .segment_reader import SegmentReader
 
 
 _LOG = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class TrickleSubscriberStats:
+    elapsed_s: float
+    get_attempts: int
+    get_retries: int
+    get_404_eos: int
+    get_470_reset: int
+    get_failures: int
+    segments_delivered: int
+    seq_gap_events: int
+    wait_ms_total: int
+
+    def __str__(self) -> str:
+        return (
+            "TrickleSubscriberStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"get_attempts={self.get_attempts}, "
+            f"get_retries={self.get_retries}, "
+            f"get_failures={self.get_failures}, "
+            f"get_404_eos={self.get_404_eos}, "
+            f"get_470_reset={self.get_470_reset}, "
+            f"segments_delivered={self.segments_delivered}, "
+            f"seq_gap_events={self.seq_gap_events}, "
+            f"wait_ms_total={self.wait_ms_total}"
+            ")"
+        )
 
 
 class TrickleSubscriber:
@@ -203,20 +231,6 @@ class TrickleSubscriber:
         assert self._lock is not None
 
         _LOG.debug("Trickle sub closing %s", self.base_url)
-        _LOG.info(
-            "TrickleSubscriber summary: elapsed=%.1fs get_attempts=%d get_retries=%d "
-            "get_failures=%d get_404_eos=%d get_470_reset=%d segments_delivered=%d "
-            "seq_gap_events=%d wait_ms_total=%d",
-            max(0.0, time.time() - self._started_at),
-            self._stats["get_attempts"],
-            self._stats["get_retries"],
-            self._stats["get_failures"],
-            self._stats["get_404_eos"],
-            self._stats["get_470_reset"],
-            self._stats["segments_delivered"],
-            self._stats["seq_gap_events"],
-            self._stats["wait_ms_total"],
-        )
         async with self._lock:
             self._errored = True
             if self._pending_get:
@@ -230,7 +244,17 @@ class TrickleSubscriber:
                 finally:
                     self._session = None
 
-    def get_stats(self) -> dict:
-        return dict(self._stats)
+    def get_stats(self) -> TrickleSubscriberStats:
+        return TrickleSubscriberStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            get_attempts=self._stats["get_attempts"],
+            get_retries=self._stats["get_retries"],
+            get_404_eos=self._stats["get_404_eos"],
+            get_470_reset=self._stats["get_470_reset"],
+            get_failures=self._stats["get_failures"],
+            segments_delivered=self._stats["segments_delivered"],
+            seq_gap_events=self._stats["seq_gap_events"],
+            wait_ms_total=self._stats["wait_ms_total"],
+        )
 
 

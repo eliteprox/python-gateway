@@ -5,6 +5,7 @@ Helpers for consuming trickle media outputs as segments, bytes, or frames.
 """
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 from enum import Enum
@@ -22,10 +23,9 @@ from .media_decode import (
 )
 
 from .segment_reader import SegmentReader
-from .trickle_subscriber import TrickleSubscriber
+from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 
 _LOG = logging.getLogger(__name__)
-_MEDIA_OUTPUT_SUMMARY_INTERVAL_S = 10.0
 
 class LagPolicy(Enum):
     """
@@ -34,6 +34,42 @@ class LagPolicy(Enum):
     FAIL = "fail"
     LATEST = "latest"
     EARLIEST = "earliest"
+
+@dataclass(frozen=True)
+class MediaOutputStats:
+    elapsed_s: float
+    segments_consumed: int
+    bytes_read: int
+    chunks_read: int
+    content_type_errors: int
+    segment_read_errors: int
+    segment_max_bytes_exceeded: int
+    consumer_lag_skip_latest: int
+    consumer_lag_retry_earliest: int
+    consumer_lag_fail: int
+    video_frames_decoded: int
+    audio_frames_decoded: int
+    decode_errors: int
+    subscriber: Optional[TrickleSubscriberStats]
+
+    def __str__(self) -> str:
+        return (
+            "MediaOutputStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"segments_consumed={self.segments_consumed}, "
+            f"bytes_read={self.bytes_read}, "
+            f"chunks_read={self.chunks_read}, "
+            f"content_type_errors={self.content_type_errors}, "
+            f"segment_read_errors={self.segment_read_errors}, "
+            f"segment_max_bytes_exceeded={self.segment_max_bytes_exceeded}, "
+            f"consumer_lag_skip_latest={self.consumer_lag_skip_latest}, "
+            f"consumer_lag_retry_earliest={self.consumer_lag_retry_earliest}, "
+            f"consumer_lag_fail={self.consumer_lag_fail}, "
+            f"video_frames_decoded={self.video_frames_decoded}, "
+            f"audio_frames_decoded={self.audio_frames_decoded}, "
+            f"decode_errors={self.decode_errors}"
+            ")"
+        )
 
 
 class MediaOutput:
@@ -99,7 +135,6 @@ class MediaOutput:
         self._next_local_seq = 0
         self._base_seq = 0
         self._started_at = time.time()
-        self._last_summary_at = self._started_at
         self._stats: dict[str, int] = {
             "segments_consumed": 0,
             "bytes_read": 0,
@@ -185,7 +220,6 @@ class MediaOutput:
                             self._stats["video_frames_decoded"] += 1
                         elif item.kind == "audio":
                             self._stats["audio_frames_decoded"] += 1
-                        self._maybe_log_summary()
                         yield item
             finally:
                 decoder.stop()
@@ -221,11 +255,8 @@ class MediaOutput:
                 self._stats["bytes_read"] += len(chunk)
                 yield chunk
             segment_stats = segment.get_stats()
-            self._stats["segment_read_errors"] += segment_stats.get("read_errors", 0)
-            self._stats["segment_max_bytes_exceeded"] += segment_stats.get(
-                "max_bytes_exceeded", 0
-            )
-            self._maybe_log_summary()
+            self._stats["segment_read_errors"] += segment_stats.read_errors
+            self._stats["segment_max_bytes_exceeded"] += segment_stats.max_bytes_exceeded
             # Use the returned segment's local seq in case we skipped ahead.
             seq = segment._local_seq + 1
             segment = await self._next_segment(seq)
@@ -302,7 +333,6 @@ class MediaOutput:
             return None
 
     async def close(self) -> None:
-        self._log_summary(prefix="close")
         for segment in self._segments:
             await segment.close()
         if self._sub is not None:
@@ -314,42 +344,22 @@ class MediaOutput:
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         await self.close()
 
-    def _maybe_log_summary(self) -> None:
-        now = time.time()
-        if now - self._last_summary_at >= _MEDIA_OUTPUT_SUMMARY_INTERVAL_S:
-            self._last_summary_at = now
-            self._log_summary(prefix="periodic")
-
-    def _log_summary(self, *, prefix: str) -> None:
-        sub_stats = self._sub.get_stats() if self._sub is not None else {}
-        _LOG.info(
-            "MediaOutput summary (%s): elapsed=%.1fs segments_consumed=%d "
-            "bytes_read=%d chunks_read=%d content_type_errors=%d "
-            "segment_read_errors=%d segment_max_bytes_exceeded=%d "
-            "consumer_lag_skip_latest=%d consumer_lag_retry_earliest=%d "
-            "consumer_lag_fail=%d video_frames_decoded=%d audio_frames_decoded=%d "
-            "decode_errors=%d sub_get_attempts=%d sub_get_retries=%d sub_get_failures=%d "
-            "sub_get_404_eos=%d sub_get_470_reset=%d sub_seq_gap_events=%d",
-            prefix,
-            max(0.0, time.time() - self._started_at),
-            self._stats["segments_consumed"],
-            self._stats["bytes_read"],
-            self._stats["chunks_read"],
-            self._stats["content_type_errors"],
-            self._stats["segment_read_errors"],
-            self._stats["segment_max_bytes_exceeded"],
-            self._stats["consumer_lag_skip_latest"],
-            self._stats["consumer_lag_retry_earliest"],
-            self._stats["consumer_lag_fail"],
-            self._stats["video_frames_decoded"],
-            self._stats["audio_frames_decoded"],
-            self._stats["decode_errors"],
-            sub_stats.get("get_attempts", 0),
-            sub_stats.get("get_retries", 0),
-            sub_stats.get("get_failures", 0),
-            sub_stats.get("get_404_eos", 0),
-            sub_stats.get("get_470_reset", 0),
-            sub_stats.get("seq_gap_events", 0),
+    def get_stats(self) -> MediaOutputStats:
+        return MediaOutputStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            segments_consumed=self._stats["segments_consumed"],
+            bytes_read=self._stats["bytes_read"],
+            chunks_read=self._stats["chunks_read"],
+            content_type_errors=self._stats["content_type_errors"],
+            segment_read_errors=self._stats["segment_read_errors"],
+            segment_max_bytes_exceeded=self._stats["segment_max_bytes_exceeded"],
+            consumer_lag_skip_latest=self._stats["consumer_lag_skip_latest"],
+            consumer_lag_retry_earliest=self._stats["consumer_lag_retry_earliest"],
+            consumer_lag_fail=self._stats["consumer_lag_fail"],
+            video_frames_decoded=self._stats["video_frames_decoded"],
+            audio_frames_decoded=self._stats["audio_frames_decoded"],
+            decode_errors=self._stats["decode_errors"],
+            subscriber=(self._sub.get_stats() if self._sub is not None else None),
         )
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
+import time
 from typing import Optional, AsyncIterator, Callable
 
 import aiohttp
@@ -10,6 +12,41 @@ from .errors import LivepeerGatewayError
 
 
 _LOG = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class TricklePublisherStats:
+    elapsed_s: float
+    segments_started: int
+    segments_completed: int
+    segments_failed: int
+    post_attempts: int
+    post_retries_no_body_consumed: int
+    post_success: int
+    post_http_failures: int
+    post_exceptions: int
+    post_404: int
+    segment_writer_put_timeouts: int
+    bytes_submitted_to_transport: int
+    terminal_failures: int
+    seq: int
+    consecutive_failures: int
+    terminal_error: bool
+
+    def __str__(self) -> str:
+        return (
+            "TricklePublisherStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"segments_started={self.segments_started}, "
+            f"segments_completed={self.segments_completed}, "
+            f"segments_failed={self.segments_failed}, "
+            f"post_attempts={self.post_attempts}, "
+            f"post_http_failures={self.post_http_failures}, "
+            f"post_exceptions={self.post_exceptions}, "
+            f"segment_writer_put_timeouts={self.segment_writer_put_timeouts}, "
+            f"terminal_failures={self.terminal_failures}, "
+            f"terminal_error={self.terminal_error}"
+            ")"
+        )
 
 
 class TricklePublishError(LivepeerGatewayError):
@@ -86,6 +123,7 @@ class TricklePublisher:
         # should be opened or written.
         self._terminal_error: Optional[TricklePublisherTerminalError] = None
         self._consecutive_failures: int = 0
+        self._started_at = time.time()
         self._stats: dict[str, int] = {
             "segments_started": 0,
             "segments_completed": 0,
@@ -369,13 +407,25 @@ class TricklePublisher:
     def _record_write_timeout(self) -> None:
         self._stats["segment_writer_put_timeouts"] += 1
 
-    def get_stats(self) -> dict:
-        return {
-            **self._stats,
-            "seq": self.seq,
-            "consecutive_failures": self._consecutive_failures,
-            "terminal_error": self._terminal_error is not None,
-        }
+    def get_stats(self) -> TricklePublisherStats:
+        return TricklePublisherStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            segments_started=self._stats["segments_started"],
+            segments_completed=self._stats["segments_completed"],
+            segments_failed=self._stats["segments_failed"],
+            post_attempts=self._stats["post_attempts"],
+            post_retries_no_body_consumed=self._stats["post_retries_no_body_consumed"],
+            post_success=self._stats["post_success"],
+            post_http_failures=self._stats["post_http_failures"],
+            post_exceptions=self._stats["post_exceptions"],
+            post_404=self._stats["post_404"],
+            segment_writer_put_timeouts=self._stats["segment_writer_put_timeouts"],
+            bytes_submitted_to_transport=self._stats["bytes_submitted_to_transport"],
+            terminal_failures=self._stats["terminal_failures"],
+            seq=self.seq,
+            consecutive_failures=self._consecutive_failures,
+            terminal_error=self._terminal_error is not None,
+        )
 
 
 class _SegmentPostState:

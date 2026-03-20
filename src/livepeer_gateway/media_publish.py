@@ -17,6 +17,7 @@ from av.video.frame import PictureType
 from .errors import LivepeerGatewayError
 from .trickle_publisher import (
     TricklePublisher,
+    TricklePublisherStats,
     TricklePublisherTerminalError,
     TrickleSegmentWriteError,
 )
@@ -26,7 +27,6 @@ _LOG = logging.getLogger(__name__)
 _OUT_TIME_BASE = Fraction(1, 90_000)
 _READ_CHUNK = 64 * 1024
 _DRAIN_TIMEOUT_S = 5.0
-_PUBLISH_SUMMARY_INTERVAL_S = 10.0
 _STOP = object()
 
 
@@ -56,6 +56,42 @@ class MediaPublishConfig:
     mime_type: str = "video/mp2t"
     keyframe_interval_s: float = 2.0
 
+@dataclass(frozen=True)
+class MediaPublishStats:
+    elapsed_s: float
+    frames_in: int
+    frames_dropped_overflow: int
+    frames_dropped_debt: int
+    frames_dropped_non_monotonic_pts: int
+    time_debt_s: float
+    segments_started: int
+    segments_completed: int
+    segments_failed: int
+    bytes_streamed_to_trickle: int
+    segment_writer_put_timeouts: int
+    terminal_failures: int
+    encoder_errors: int
+    publisher: TricklePublisherStats
+
+    def __str__(self) -> str:
+        return (
+            "MediaPublishStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"frames_in={self.frames_in}, "
+            f"frames_dropped_overflow={self.frames_dropped_overflow}, "
+            f"frames_dropped_debt={self.frames_dropped_debt}, "
+            f"frames_dropped_non_monotonic_pts={self.frames_dropped_non_monotonic_pts}, "
+            f"time_debt_s={self.time_debt_s:.4f}, "
+            f"segments_started={self.segments_started}, "
+            f"segments_completed={self.segments_completed}, "
+            f"segments_failed={self.segments_failed}, "
+            f"bytes_streamed_to_trickle={self.bytes_streamed_to_trickle}, "
+            f"segment_writer_put_timeouts={self.segment_writer_put_timeouts}, "
+            f"terminal_failures={self.terminal_failures}, "
+            f"encoder_errors={self.encoder_errors}"
+            ")"
+        )
+
 
 class MediaPublish:
     def __init__(
@@ -80,7 +116,6 @@ class MediaPublish:
         self._closed = False
         self._error: Optional[BaseException] = None
         self._started_at = time.time()
-        self._last_summary_at = self._started_at
         self._stats: dict[str, int] = {
             "frames_in": 0,
             "frames_dropped_overflow": 0,
@@ -156,7 +191,6 @@ class MediaPublish:
                 self._error,
                 exc_info=(type(self._error), self._error, self._error.__traceback__),
             )
-        self._log_publish_summary(prefix="close")
 
     def _ensure_thread(self) -> None:
         with self._start_lock:
@@ -320,7 +354,6 @@ class MediaPublish:
                     # lean on that instead of doing that here
                     await segment.write(chunk)
             self._stats["segments_completed"] += 1
-            self._maybe_log_publish_summary()
         except TricklePublisherTerminalError as e:
             # At this point, publisher.next() has exhausted its retries and the
             # publisher cannot be used for future segments.
@@ -361,47 +394,29 @@ class MediaPublish:
         except BaseException:
             pass
 
-    def _maybe_log_publish_summary(self) -> None:
-        now = time.time()
-        if now - self._last_summary_at >= _PUBLISH_SUMMARY_INTERVAL_S:
-            self._last_summary_at = now
-            self._log_publish_summary(prefix="periodic")
-
-    def _log_publish_summary(self, *, prefix: str) -> None:
+    def get_stats(self) -> MediaPublishStats:
         publisher_stats = self._publisher.get_stats()
-        elapsed_s = max(0.0, time.time() - self._started_at)
-        _LOG.info(
-            "MediaPublish summary (%s): elapsed=%.1fs "
-            "frames_in=%d frames_dropped_overflow=%d frames_dropped_debt=%d "
-            "frames_dropped_non_monotonic_pts=%d time_debt_s=%.4f "
-            "segments_started=%d segments_completed=%d segments_failed=%d "
-            "bytes_streamed_to_trickle=%d "
-            "post_attempts=%d post_retries_no_body_consumed=%d post_http_failures=%d "
-            "post_exceptions=%d post_404=%d segment_writer_put_timeouts=%d "
-            "terminal_failures=%d encoder_errors=%d terminal_error=%s",
-            prefix,
-            elapsed_s,
-            self._stats["frames_in"],
-            self._stats["frames_dropped_overflow"],
-            self._stats["frames_dropped_debt"],
-            self._stats["frames_dropped_non_monotonic_pts"],
-            self._frame_queue.time_debt_s,
-            self._stats["segments_started"],
-            self._stats["segments_completed"],
-            self._stats["segments_failed"],
-            self._stats["bytes_streamed_to_trickle"],
-            publisher_stats.get("post_attempts", 0),
-            publisher_stats.get("post_retries_no_body_consumed", 0),
-            publisher_stats.get("post_http_failures", 0),
-            publisher_stats.get("post_exceptions", 0),
-            publisher_stats.get("post_404", 0),
-            publisher_stats.get("segment_writer_put_timeouts", 0),
-            max(
-                self._stats["terminal_failures"],
-                int(publisher_stats.get("terminal_failures", 0)),
+        return MediaPublishStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            frames_in=self._stats["frames_in"],
+            frames_dropped_overflow=self._stats["frames_dropped_overflow"],
+            frames_dropped_debt=self._stats["frames_dropped_debt"],
+            frames_dropped_non_monotonic_pts=self._stats["frames_dropped_non_monotonic_pts"],
+            time_debt_s=self._frame_queue.time_debt_s,
+            segments_started=self._stats["segments_started"],
+            segments_completed=self._stats["segments_completed"],
+            segments_failed=self._stats["segments_failed"],
+            bytes_streamed_to_trickle=self._stats["bytes_streamed_to_trickle"],
+            segment_writer_put_timeouts=max(
+                self._stats["segment_writer_put_timeouts"],
+                publisher_stats.segment_writer_put_timeouts,
             ),
-            self._stats["encoder_errors"],
-            publisher_stats.get("terminal_error", False),
+            terminal_failures=max(
+                self._stats["terminal_failures"],
+                publisher_stats.terminal_failures,
+            ),
+            encoder_errors=self._stats["encoder_errors"],
+            publisher=publisher_stats,
         )
 
 
