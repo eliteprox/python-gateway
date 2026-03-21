@@ -55,6 +55,7 @@ class MediaPublishConfig:
     fps: Optional[float] = None
     mime_type: str = "video/mp2t"
     keyframe_interval_s: float = 2.0
+    queue_size: int = 8
 
 @dataclass(frozen=True)
 class MediaPublishStats:
@@ -64,6 +65,7 @@ class MediaPublishStats:
     frames_dropped_debt: int
     frames_dropped_non_monotonic_pts: int
     time_debt_s: float
+    queue_depth: int
     segments_started: int
     segments_completed: int
     segments_failed: int
@@ -82,6 +84,7 @@ class MediaPublishStats:
             f"frames_dropped_debt={self.frames_dropped_debt}, "
             f"frames_dropped_non_monotonic_pts={self.frames_dropped_non_monotonic_pts}, "
             f"time_debt_s={self.time_debt_s:.4f}, "
+            f"queue_depth={self.queue_depth}, "
             f"segments_started={self.segments_started}, "
             f"segments_completed={self.segments_completed}, "
             f"segments_failed={self.segments_failed}, "
@@ -129,7 +132,7 @@ class MediaPublish:
             "segment_writer_put_timeouts": 0,
             "encoder_errors": 0,
         }
-        self._frame_queue = _FrameQueue(maxsize=8, stats=self._stats)
+        self._frame_queue = _FrameQueue(maxsize=config.queue_size, stats=self._stats)
 
         # Encoder state (owned by the encoder thread).
         self._container: Optional[av.container.OutputContainer] = None
@@ -403,6 +406,7 @@ class MediaPublish:
             frames_dropped_debt=self._stats["frames_dropped_debt"],
             frames_dropped_non_monotonic_pts=self._stats["frames_dropped_non_monotonic_pts"],
             time_debt_s=self._frame_queue.time_debt_s,
+            queue_depth=self._frame_queue.qsize,
             segments_started=self._stats["segments_started"],
             segments_completed=self._stats["segments_completed"],
             segments_failed=self._stats["segments_failed"],
@@ -518,6 +522,10 @@ class _FrameQueue:
     def time_debt_s(self) -> float:
         # Metric for "how far behind are we", in seconds.
         return self._time_debt_s
+
+    @property
+    def qsize(self) -> int:
+        return self._queue.qsize()
 
     def _accept_candidate(self, candidate: av.VideoFrame) -> bool:
         candidate_media_time_s = self._frame_media_time_s(candidate)
