@@ -43,16 +43,23 @@ class OrchestratorRpcError(LivepeerGatewayError):
 
 def create_orchestrator_stub(
     orch_url: str,
+    *,
+    use_tofu: bool = True,
 ) -> Tuple[grpc.Channel, lp_rpc_pb2_grpc.OrchestratorStub]:
-    # Always use TLS. "Ignore" invalid/self-signed certs by trusting the exact
-    # certificate the server presents (trust-on-first-use) and overriding the
-    # expected authority to match that cert.
-    root_pem, authority, target = _trust_on_first_use_root_cert(orch_url)
-    credentials = grpc.ssl_channel_credentials(root_certificates=root_pem)
-    options = [
-        ("grpc.ssl_target_name_override", authority),
-        ("grpc.default_authority", authority),
-    ]
+    # Always use TLS. TOFU can be disabled to use gRPC's default CA trust store.
+    target = _parse_grpc_target(orch_url)
+    if use_tofu:
+        # "Ignore" invalid/self-signed certs by trusting the exact certificate
+        # the server presents (trust-on-first-use) and overriding authority.
+        root_pem, authority = _trust_on_first_use_root_cert_target(target)
+        credentials = grpc.ssl_channel_credentials(root_certificates=root_pem)
+        options = [
+            ("grpc.ssl_target_name_override", authority),
+            ("grpc.default_authority", authority),
+        ]
+    else:
+        credentials = grpc.ssl_channel_credentials()
+        options = []
     channel = grpc.secure_channel(target, credentials, options=options)
     stub = lp_rpc_pb2_grpc.OrchestratorStub(channel)
     return channel, stub
@@ -89,6 +96,7 @@ def get_orch_info(
     signer_url: Optional[str] = None,
     signer_headers: Optional[dict[str, str]] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+    use_tofu: bool = True,
 ) -> lp_rpc_pb2.OrchestratorInfo:
     """
     Fetch orchestrator info over gRPC.
@@ -96,13 +104,16 @@ def get_orch_info(
     Public functional API:
         get_orch_info(orch_url, signer_url=...)
     Remote signer is called once per process (cached).
-    Always uses secure channel (TLS) with certificate verification disabled.
+    Always uses a secure gRPC channel (TLS).
+    - With TOFU enabled, it trusts the first observed server certificate per target.
+    - With TOFU disabled, it uses gRPC's default system CA trust roots.
     """
     _LOG.debug(
-        "Fetching orchestrator info orch=%s signer=%s capabilities=%s",
+        "Fetching orchestrator info orch=%s signer=%s capabilities=%s use_tofu=%s",
         orch_url,
         signer_url or "",
         "set" if capabilities is not None else "none",
+        str(use_tofu),
     )
     try:
         signer = get_orch_info_sig(signer_url, _freeze_headers(signer_headers))
@@ -122,7 +133,7 @@ def get_orch_info(
     if capabilities is not None:
         request.capabilities.CopyFrom(capabilities)
 
-    # Retry once on certificate verification failures.
+    # Retry once on certificate verification failures (TOFU mode only).
     #
     # Why this exists:
     # - TOFU pins the cert we first observed for a target.
@@ -133,12 +144,13 @@ def get_orch_info(
     # On that specific failure we evict the cached TOFU cert for this target
     # and retry once so we can probe and trust the new certificate.
     target = _parse_grpc_target(orch_url)
-    for attempt in range(2):
-        _, stub = create_orchestrator_stub(orch_url)
+    max_attempts = 2 if use_tofu else 1
+    for attempt in range(max_attempts):
+        _, stub = create_orchestrator_stub(orch_url, use_tofu=use_tofu)
         try:
             return call_get_orchestrator(stub, request, orch_url)
         except OrchestratorRpcError as e:
-            if attempt == 0 and _is_cert_verify_error(e):
+            if use_tofu and attempt == 0 and _is_cert_verify_error(e):
                 _LOG.info(
                     "Orchestrator %s TLS cert changed (likely restarted); "
                     "evicting cached TOFU cert and retrying once",

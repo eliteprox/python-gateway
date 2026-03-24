@@ -30,11 +30,13 @@ class SelectionCursor:
         signer_url: Optional[str] = None,
         signer_headers: Optional[dict[str, str]] = None,
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+        use_tofu: bool = True,
     ) -> None:
         self._orch_list = list(orch_list)
         self._signer_url = signer_url
         self._signer_headers = signer_headers
         self._capabilities = capabilities
+        self._use_tofu = use_tofu
         self._batch_start = 0
         self._pending_successes: list[Tuple[str, lp_rpc_pb2.OrchestratorInfo]] = []
         self.rejections: list[OrchestratorRejection] = []
@@ -77,6 +79,7 @@ class SelectionCursor:
                     signer_url=self._signer_url,
                     signer_headers=self._signer_headers,
                     capabilities=self._capabilities,
+                    use_tofu=self._use_tofu,
                 ): url
                 for url in batch
             }
@@ -110,6 +113,7 @@ def orchestrator_selector(
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+    use_tofu: bool = True,
 ) -> SelectionCursor:
     orch_list = discover_orchestrators(
         orchestrators,
@@ -129,4 +133,5 @@ def orchestrator_selector(
         signer_url=signer_url,
         signer_headers=signer_headers,
         capabilities=capabilities,
+        use_tofu=use_tofu,
     )

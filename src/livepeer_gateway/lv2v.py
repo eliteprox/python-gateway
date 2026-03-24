@@ -292,6 +292,7 @@ def start_lv2v(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    use_tofu: bool = True,
     timeout: float = 5.0,
 ) -> LiveVideoToVideo:
     """
@@ -317,6 +318,10 @@ def start_lv2v(
     ``timeout`` controls only the initial HTTP POST to
     ``/live-video-to-video`` after an orchestrator has been selected.
     Discovery and ``GetOrchestrator`` calls use their own timeouts.
+
+    ``use_tofu`` controls TLS mode for ``GetOrchestrator``:
+    - True: trust-on-first-use certificate pinning
+    - False: default gRPC/system CA roots
     """
     if not req.model_id:
         raise LivepeerGatewayError("start_lv2v requires model_id")
@@ -346,6 +351,7 @@ def start_lv2v(
         discovery_url=resolved_discovery_url,
         discovery_headers=resolved_discovery_headers,
         capabilities=capabilities,
+        use_tofu=use_tofu,
     )
 
     start_rejections: list[OrchestratorRejection] = []
@@ -370,6 +376,7 @@ def start_lv2v(
                 signer_headers=resolved_signer_headers,
                 type="lv2v",
                 capabilities=capabilities,
+                use_tofu=use_tofu,
             )
             p = session.get_payment()
             headers: dict[str, str] = {
