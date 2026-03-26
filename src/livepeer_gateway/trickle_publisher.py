@@ -103,14 +103,15 @@ class TricklePublisher:
         url: str,
         mime_type: str,
         *,
+        start_seq: int = -1,
         connection_close: bool = False,
         max_consecutive_failures: int = 3,
     ):
         self.url = url.rstrip("/")
         self.mime_type = mime_type
         self.connection_close = connection_close
-        self.seq = 0
         self._max_consecutive_failures = max(1, int(max_consecutive_failures))
+        self.seq = int(start_seq)
 
         # Lazily initialized async runtime bits (safe to construct in sync code).
         self._lock: Optional[asyncio.Lock] = None
@@ -156,7 +157,7 @@ class TricklePublisher:
     def _stream_url(self, seq: int) -> str:
         return f"{self.url}/{seq}"
 
-    async def preconnect(self, seq: int) -> _SegmentPostState:
+    async def preconnect(self, seq: int, *, send_reset: bool = False) -> _SegmentPostState:
         """
         Start the POST for `seq` in the background and return mutable segment state.
         """
@@ -166,7 +167,7 @@ class TricklePublisher:
         url = self._stream_url(seq)
         _LOG.debug("Trickle preconnect: %s", url)
 
-        state = _SegmentPostState(seq)
+        state = _SegmentPostState(seq, send_reset=send_reset)
         asyncio.create_task(self._run_post(url, state))
         return state
 
@@ -183,6 +184,9 @@ class TricklePublisher:
             self._stats["post_attempts"] += 1
             seg_state.data_consumed = False
             headers = {"Content-Type": self.mime_type}
+            if seg_state.send_reset:
+                # Unblocks any hanging subscribers from a previous publish
+                headers["Lp-Trickle-Reset"] = "1"
             if self.connection_close:
                 headers["Connection"] = "close"
             try:
@@ -313,6 +317,24 @@ class TricklePublisher:
             raise ValueError(f"Trickle create failed: status={resp.status} body={body!r}")
         resp.release()
 
+    async def _resolve_next_seq(self) -> int:
+        """Resolve seq via /next, or return -1 on failure."""
+        assert self._session is not None
+        url = f"{self.url}/next"
+        try:
+            resp = await self._session.get(url)
+            latest = resp.headers.get("Lp-Trickle-Latest")
+            resp.release()
+            if latest is not None:
+                resolved_seq = int(latest)
+                _LOG.debug("Trickle resolved seq from %s: %s", url, resolved_seq)
+                return resolved_seq
+            else:
+                _LOG.warning("Trickle /next missing Lp-Trickle-Latest header")
+        except Exception:
+            _LOG.warning("Trickle /next request failed", exc_info=True)
+        return -1
+
     async def next(self) -> "SegmentWriter":
         await self._ensure_runtime()
         assert self._lock is not None
@@ -320,16 +342,22 @@ class TricklePublisher:
         async with self._lock:
             if self._terminal_error is not None:
                 raise self._terminal_error
+
+            send_reset = False
+            if self.seq < 0:
+                send_reset = True
+                self.seq = await self._resolve_next_seq()
+
             if self._next_state is None or self._next_state.seq != self.seq:
                 # don't have queue, or a queue for the wrong seq
-                self._next_state = await self.preconnect(self.seq)
+                self._next_state = await self.preconnect(self.seq, send_reset=send_reset)
 
             seg_state = self._next_state
             assert seg_state is not None
             self._next_state = None
             self._stats["segments_started"] += 1
 
-            # Preconnect the next segment in the background.
+            # Preconnect the next segment in the background
             self.seq += 1
             asyncio.create_task(self._preconnect_task(self.seq))
 
@@ -429,14 +457,15 @@ class TricklePublisher:
 
 
 class _SegmentPostState:
-    __slots__ = ("seq", "queue", "error", "data_consumed")
+    __slots__ = ("seq", "queue", "error", "data_consumed", "send_reset")
 
-    def __init__(self, seq: int) -> None:
+    def __init__(self, seq: int, *, send_reset: bool = False) -> None:
         self.seq = seq
         self.queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=1)
         # Failure for this one segment only, not necessarily terminal
         self.error: Optional[TrickleSegmentWriteError] = None
         self.data_consumed: bool = False
+        self.send_reset: bool = send_reset
 
 _SEGMENT_QUEUE_PUT_TIMEOUT_S = 5.0
 
