@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from livepeer_gateway.capabilities import (
+    build_capabilities_from_queries,
     compute_available,
     format_capability,
     get_capacity_in_use,
@@ -28,6 +29,10 @@ def _parse_args() -> argparse.Namespace:
             "\n"
             "  # Signer URL\n"
             "  python examples/get_orchestrator_info.py --signer https://signer.example.com\n"
+            "\n"
+            "  # Request specific capabilities (e.g. BYOC)\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --signer https://signer.example.com --caps byoc/text-reversal\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop byoc/my-pipeline\n"
             "\n"
             "  # JSON / JSONL output\n"
             "  python examples/get_orchestrator_info.py localhost:8935 --format json\n"
@@ -54,6 +59,13 @@ def _parse_args() -> argparse.Namespace:
         "--debug",
         action="store_true",
         help="Enable debug logging for discovery diagnostics.",
+    )
+    p.add_argument(
+        "--caps",
+        nargs="*",
+        default=None,
+        metavar="PIPELINE/MODEL",
+        help="Request specific capabilities in pipeline/model form (e.g. byoc/text-reversal).",
     )
     p.add_argument(
         "--format",
@@ -323,6 +335,8 @@ def main() -> None:
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
+    capabilities = build_capabilities_from_queries(args.caps) if args.caps else None
+
     json_results: list[dict[str, Any]] = []
 
     def _json_info(orch_url: str, info: Any) -> None:
@@ -349,11 +363,16 @@ def main() -> None:
             args.orchestrators,
             signer_url=args.signer,
             discovery_url=args.discovery,
+            capabilities=capabilities,
         )
 
         for orch_url in orch_list:
             try:
-                info = get_orch_info(orch_url, signer_url=args.signer)
+                info = get_orch_info(
+                    orch_url,
+                    signer_url=args.signer,
+                    capabilities=capabilities,
+                )
             except LivepeerGatewayError as e:
                 print_error(orch_url, e)
                 continue
