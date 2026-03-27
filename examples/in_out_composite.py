@@ -62,6 +62,11 @@ def _parse_args() -> argparse.Namespace:
         help="Remote signer URL (no path). If omitted, runs in offchain mode.",
     )
     p.add_argument(
+        "--token",
+        default=None,
+        help="Base64-encoded gateway token used to resolve signer/discovery/orchestrators.",
+    )
+    p.add_argument(
         "--discovery",
         default=None,
         help="Discovery endpoint for orchestrators.",
@@ -432,6 +437,7 @@ async def main() -> None:
         job = start_lv2v(
             args.orchestrator,
             StartJobRequest(model_id=args.model),
+            token=args.token,
             signer_url=args.signer,
             discovery_url=args.discovery,
         )
