@@ -1013,6 +1013,15 @@ class MediaPublish:
                 self._channel_name,
                 exc_info=True,
             )
+        except TrickleSegmentWriteError as e:
+            self._stats["segments_failed"] += 1
+            await self._close_active_segment(mark_completed=False)
+            _LOG.warning(
+                "MediaPublish[%s] dropped segment seq=%s reason=%s",
+                self._channel_name,
+                segment_seq,
+                e,
+            )
         except Exception:
             self._stats["segments_failed"] += 1
             await self._close_active_segment(mark_completed=False)
