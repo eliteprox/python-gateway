@@ -1,3 +1,5 @@
+from .byoc import BYOCJob, BYOCJobRequest, start_byoc_job
+from .byoc_payments import BYOCPaymentSession
 from .capabilities import CapabilityId, build_capabilities
 from .channel_reader import ChannelReader, JSONLReader
 from .channel_writer import ChannelWriter, JSONLWriter
@@ -43,6 +45,9 @@ from .segment_reader import SegmentReader, SegmentReaderStats
 from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 
 __all__ = [
+    "BYOCJob",
+    "BYOCJobRequest",
+    "BYOCPaymentSession",
     "clear_all_cached_tokens",
     "Control",
     "ControlConfig",
@@ -82,6 +87,7 @@ __all__ = [
     "SelectionCursor",
     "orchestrator_selector",
     "StartJobRequest",
+    "start_byoc_job",
     "start_lv2v",
     "start_scope",
     "OAuth2Token",
