@@ -68,6 +68,7 @@ class MediaOutputStats:
             f"video_frames_decoded={self.video_frames_decoded}, "
             f"audio_frames_decoded={self.audio_frames_decoded}, "
             f"decode_errors={self.decode_errors}"
+            f"{', subscriber=' + str(self.subscriber) if self.subscriber is not None else ''}"
             ")"
         )
 

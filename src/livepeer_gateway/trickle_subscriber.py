@@ -24,6 +24,7 @@ class TrickleSubscriberStats:
     segments_delivered: int
     seq_gap_events: int
     wait_ms_total: int
+    latest_seq: int
 
     def __str__(self) -> str:
         return (
@@ -36,7 +37,8 @@ class TrickleSubscriberStats:
             f"get_470_reset={self.get_470_reset}, "
             f"segments_delivered={self.segments_delivered}, "
             f"seq_gap_events={self.seq_gap_events}, "
-            f"wait_ms_total={self.wait_ms_total}"
+            f"wait_ms_total={self.wait_ms_total}, "
+            f"latest_seq={self.latest_seq}"
             ")"
         )
 
@@ -83,6 +85,7 @@ class TrickleSubscriber:
             "segments_delivered": 0,
             "seq_gap_events": 0,
             "wait_ms_total": 0,
+            "latest_seq": start_seq,
         }
 
     async def __aenter__(self) -> "TrickleSubscriber":
@@ -100,6 +103,16 @@ class TrickleSubscriber:
 
     def _segment_url(self, seq: int) -> str:
         return f"{self.base_url}/{seq}"
+
+    @staticmethod
+    def _latest_seq(headers: "aiohttp.typedefs.LooseHeaders", current_seq: int) -> int:
+        latest_header = headers.get("Lp-Trickle-Latest")
+        if latest_header is None:
+            return current_seq
+        try:
+            return int(latest_header)
+        except ValueError:
+            return current_seq
 
     async def _preconnect(self) -> Optional[aiohttp.ClientResponse]:
         """
@@ -136,11 +149,8 @@ class TrickleSubscriber:
                 if resp.status == 470:
                     # Channel exists but no data at this index, so reset.
                     self._stats["get_470_reset"] += 1
-                    latest = resp.headers.get("Lp-Trickle-Latest") or "-1"
-                    try:
-                        seq = int(latest)
-                    except ValueError:
-                        seq = -1
+                    seq = self._latest_seq(resp.headers, seq)
+                    self._stats["latest_seq"] = seq
                     self._seq = seq
                     url = self._segment_url(seq)
                     _LOG.debug("Trickle sub resetting index to leading edge %s", url)
@@ -203,6 +213,8 @@ class TrickleSubscriber:
                 if expected_seq >= 0 and seq != expected_seq:
                     self._stats["seq_gap_events"] += 1
                 self._seq = seq + 1
+            current_seq = seq if seq >= 0 else expected_seq
+            self._stats["latest_seq"] = self._latest_seq(segment.headers(), current_seq)
             self._stats["segments_delivered"] += 1
 
             # Set up the next connection in the background
@@ -255,6 +267,7 @@ class TrickleSubscriber:
             segments_delivered=self._stats["segments_delivered"],
             seq_gap_events=self._stats["seq_gap_events"],
             wait_ms_total=self._stats["wait_ms_total"],
+            latest_seq=self._stats["latest_seq"],
         )
 
 

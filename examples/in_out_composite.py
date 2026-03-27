@@ -6,7 +6,6 @@ of input, loopback, output, and an empty tile with latency overlays.
 import argparse
 import asyncio
 from collections import deque
-from dataclasses import asdict
 import logging
 import queue
 import threading
@@ -545,17 +544,14 @@ async def main() -> None:
             media_stats = media.get_stats()
             print("\nMedia publish stats:")
             print(media_stats)
-            print(asdict(media_stats))
         if output_stream is not None:
             output_stats = output_stream.get_stats()
             print("\nOutput stream stats:")
             print(output_stats)
-            print(asdict(output_stats))
         if loopback_stream is not None:
             loopback_stats = loopback_stream.get_stats()
             print("\nLoopback stream stats:")
             print(loopback_stats)
-            print(asdict(loopback_stats))
         if job is not None:
             try:
                 await job.close()
