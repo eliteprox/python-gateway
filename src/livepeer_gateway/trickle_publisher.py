@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
+import time
 from typing import Optional, AsyncIterator, Callable
 
 import aiohttp
@@ -10,6 +12,41 @@ from .errors import LivepeerGatewayError
 
 
 _LOG = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class TricklePublisherStats:
+    elapsed_s: float
+    segments_started: int
+    segments_completed: int
+    segments_failed: int
+    post_attempts: int
+    post_retries_no_body_consumed: int
+    post_success: int
+    post_http_failures: int
+    post_exceptions: int
+    post_404: int
+    segment_writer_put_timeouts: int
+    bytes_submitted_to_transport: int
+    terminal_failures: int
+    seq: int
+    consecutive_failures: int
+    terminal_error: bool
+
+    def __str__(self) -> str:
+        return (
+            "TricklePublisherStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"segments_started={self.segments_started}, "
+            f"segments_completed={self.segments_completed}, "
+            f"segments_failed={self.segments_failed}, "
+            f"post_attempts={self.post_attempts}, "
+            f"post_http_failures={self.post_http_failures}, "
+            f"post_exceptions={self.post_exceptions}, "
+            f"segment_writer_put_timeouts={self.segment_writer_put_timeouts}, "
+            f"terminal_failures={self.terminal_failures}, "
+            f"terminal_error={self.terminal_error}"
+            ")"
+        )
 
 
 class TricklePublishError(LivepeerGatewayError):
@@ -66,14 +103,15 @@ class TricklePublisher:
         url: str,
         mime_type: str,
         *,
+        start_seq: int = -1,
         connection_close: bool = False,
         max_consecutive_failures: int = 3,
     ):
         self.url = url.rstrip("/")
         self.mime_type = mime_type
         self.connection_close = connection_close
-        self.seq = 0
         self._max_consecutive_failures = max(1, int(max_consecutive_failures))
+        self.seq = int(start_seq)
 
         # Lazily initialized async runtime bits (safe to construct in sync code).
         self._lock: Optional[asyncio.Lock] = None
@@ -86,6 +124,21 @@ class TricklePublisher:
         # should be opened or written.
         self._terminal_error: Optional[TricklePublisherTerminalError] = None
         self._consecutive_failures: int = 0
+        self._started_at = time.time()
+        self._stats: dict[str, int] = {
+            "segments_started": 0,
+            "segments_completed": 0,
+            "segments_failed": 0,
+            "post_attempts": 0,
+            "post_retries_no_body_consumed": 0,
+            "post_success": 0,
+            "post_http_failures": 0,
+            "post_exceptions": 0,
+            "post_404": 0,
+            "segment_writer_put_timeouts": 0,
+            "bytes_submitted_to_transport": 0,
+            "terminal_failures": 0,
+        }
 
     async def __aenter__(self) -> "TricklePublisher":
         return self
@@ -104,7 +157,7 @@ class TricklePublisher:
     def _stream_url(self, seq: int) -> str:
         return f"{self.url}/{seq}"
 
-    async def preconnect(self, seq: int) -> _SegmentPostState:
+    async def preconnect(self, seq: int, *, send_reset: bool = False) -> _SegmentPostState:
         """
         Start the POST for `seq` in the background and return mutable segment state.
         """
@@ -114,7 +167,7 @@ class TricklePublisher:
         url = self._stream_url(seq)
         _LOG.debug("Trickle preconnect: %s", url)
 
-        state = _SegmentPostState(seq)
+        state = _SegmentPostState(seq, send_reset=send_reset)
         asyncio.create_task(self._run_post(url, state))
         return state
 
@@ -128,8 +181,12 @@ class TricklePublisher:
         final_body: Optional[str] = None
 
         for attempt in range(2):
+            self._stats["post_attempts"] += 1
             seg_state.data_consumed = False
             headers = {"Content-Type": self.mime_type}
+            if seg_state.send_reset:
+                # Unblocks any hanging subscribers from a previous publish
+                headers["Lp-Trickle-Reset"] = "1"
             if self.connection_close:
                 headers["Connection"] = "close"
             try:
@@ -150,7 +207,10 @@ class TricklePublisher:
                 resp.release()
                 if resp.status == 200:
                     self._consecutive_failures = 0
+                    self._stats["post_success"] += 1
+                    self._stats["segments_completed"] += 1
                     return
+                self._stats["post_http_failures"] += 1
                 final_exc = TrickleSegmentWriteError(
                     f"Trickle POST failed url={url} status={resp.status} body={final_body!r}",
                     seq=seq,
@@ -158,6 +218,7 @@ class TricklePublisher:
                     status=resp.status,
                 )
             except Exception as e:
+                self._stats["post_exceptions"] += 1
                 err = TrickleSegmentWriteError(
                     f"Trickle POST exception url={url}",
                     seq=seq,
@@ -170,9 +231,11 @@ class TricklePublisher:
 
             if final_status == 404:
                 # Stream doesn't exist on the server; fail fast and do not retry.
+                self._stats["post_404"] += 1
                 break
 
             if not seg_state.data_consumed and attempt == 0:
+                self._stats["post_retries_no_body_consumed"] += 1
                 _LOG.warning(
                     "Trickle POST retrying same segment url=%s (no request body consumed)",
                     url,
@@ -195,6 +258,7 @@ class TricklePublisher:
             )
             terminal_exc.__cause__ = final_exc
             self._terminal_error = terminal_exc
+            self._stats["terminal_failures"] += 1
 
     def _record_segment_failure(
         self,
@@ -202,6 +266,7 @@ class TricklePublisher:
         seg_state: _SegmentPostState,
     ) -> None:
         seg_state.error = exc
+        self._stats["segments_failed"] += 1
         self._consecutive_failures += 1
         # check whether failure limit has been hit
         if self._terminal_error is None and self._consecutive_failures >= self._max_consecutive_failures:
@@ -216,6 +281,7 @@ class TricklePublisher:
             )
             terminal_exc.__cause__ = exc
             self._terminal_error = terminal_exc
+            self._stats["terminal_failures"] += 1
 
     async def _run_delete(self) -> None:
         await self._ensure_runtime()
@@ -251,6 +317,24 @@ class TricklePublisher:
             raise ValueError(f"Trickle create failed: status={resp.status} body={body!r}")
         resp.release()
 
+    async def _resolve_next_seq(self) -> int:
+        """Resolve seq via /next, or return -1 on failure."""
+        assert self._session is not None
+        url = f"{self.url}/next"
+        try:
+            resp = await self._session.get(url)
+            latest = resp.headers.get("Lp-Trickle-Latest")
+            resp.release()
+            if latest is not None:
+                resolved_seq = int(latest)
+                _LOG.debug("Trickle resolved seq from %s: %s", url, resolved_seq)
+                return resolved_seq
+            else:
+                _LOG.warning("Trickle /next missing Lp-Trickle-Latest header")
+        except Exception:
+            _LOG.warning("Trickle /next request failed", exc_info=True)
+        return -1
+
     async def next(self) -> "SegmentWriter":
         await self._ensure_runtime()
         assert self._lock is not None
@@ -258,19 +342,31 @@ class TricklePublisher:
         async with self._lock:
             if self._terminal_error is not None:
                 raise self._terminal_error
+
+            send_reset = False
+            if self.seq < 0:
+                send_reset = True
+                self.seq = await self._resolve_next_seq()
+
             if self._next_state is None or self._next_state.seq != self.seq:
                 # don't have queue, or a queue for the wrong seq
-                self._next_state = await self.preconnect(self.seq)
+                self._next_state = await self.preconnect(self.seq, send_reset=send_reset)
 
             seg_state = self._next_state
             assert seg_state is not None
             self._next_state = None
+            self._stats["segments_started"] += 1
 
-            # Preconnect the next segment in the background.
+            # Preconnect the next segment in the background
             self.seq += 1
             asyncio.create_task(self._preconnect_task(self.seq))
 
-        return SegmentWriter(seg_state, error_getter=lambda: self._terminal_error)
+        return SegmentWriter(
+            seg_state,
+            error_getter=lambda: self._terminal_error,
+            on_write_bytes=self._record_write_bytes,
+            on_write_timeout=self._record_write_timeout,
+        )
 
     async def _preconnect_task(self, seq: int) -> None:
         await self._ensure_runtime()
@@ -333,16 +429,43 @@ class TricklePublisher:
                     _LOG.warning("Trickle close suppressed fallback session close failure url=%s", self.url, exc_info=True)
                 self._session = None
 
+    def _record_write_bytes(self, byte_count: int) -> None:
+        self._stats["bytes_submitted_to_transport"] += max(0, byte_count)
+
+    def _record_write_timeout(self) -> None:
+        self._stats["segment_writer_put_timeouts"] += 1
+
+    def get_stats(self) -> TricklePublisherStats:
+        return TricklePublisherStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            segments_started=self._stats["segments_started"],
+            segments_completed=self._stats["segments_completed"],
+            segments_failed=self._stats["segments_failed"],
+            post_attempts=self._stats["post_attempts"],
+            post_retries_no_body_consumed=self._stats["post_retries_no_body_consumed"],
+            post_success=self._stats["post_success"],
+            post_http_failures=self._stats["post_http_failures"],
+            post_exceptions=self._stats["post_exceptions"],
+            post_404=self._stats["post_404"],
+            segment_writer_put_timeouts=self._stats["segment_writer_put_timeouts"],
+            bytes_submitted_to_transport=self._stats["bytes_submitted_to_transport"],
+            terminal_failures=self._stats["terminal_failures"],
+            seq=self.seq,
+            consecutive_failures=self._consecutive_failures,
+            terminal_error=self._terminal_error is not None,
+        )
+
 
 class _SegmentPostState:
-    __slots__ = ("seq", "queue", "error", "data_consumed")
+    __slots__ = ("seq", "queue", "error", "data_consumed", "send_reset")
 
-    def __init__(self, seq: int) -> None:
+    def __init__(self, seq: int, *, send_reset: bool = False) -> None:
         self.seq = seq
         self.queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=1)
         # Failure for this one segment only, not necessarily terminal
         self.error: Optional[TrickleSegmentWriteError] = None
         self.data_consumed: bool = False
+        self.send_reset: bool = send_reset
 
 _SEGMENT_QUEUE_PUT_TIMEOUT_S = 5.0
 
@@ -352,11 +475,15 @@ class SegmentWriter:
         seg_state: _SegmentPostState,
         *,
         error_getter: Optional[Callable[[], Optional[TricklePublisherTerminalError]]] = None,
+        on_write_bytes: Optional[Callable[[int], None]] = None,
+        on_write_timeout: Optional[Callable[[], None]] = None,
     ):
         self._seg_state = seg_state
         self.queue = seg_state.queue
         self._seq = seg_state.seq
         self._error_getter = error_getter
+        self._on_write_bytes = on_write_bytes
+        self._on_write_timeout = on_write_timeout
 
     async def write(self, data: bytes) -> None:
         if self._error_getter is not None:
@@ -370,7 +497,11 @@ class SegmentWriter:
             # This bounds local backpressure while feeding the request body; it does
             # not bound the total lifetime of the HTTP POST once the body is drained.
             await asyncio.wait_for(self.queue.put(data), timeout=_SEGMENT_QUEUE_PUT_TIMEOUT_S)
+            if self._on_write_bytes is not None:
+                self._on_write_bytes(len(data))
         except asyncio.TimeoutError as e:
+            if self._on_write_timeout is not None:
+                self._on_write_timeout()
             if self._error_getter is not None:
                 err = self._error_getter()
                 if err is not None:

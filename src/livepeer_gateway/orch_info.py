@@ -7,7 +7,6 @@ import socket
 import ssl
 import tempfile
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -19,6 +18,17 @@ from .errors import LivepeerGatewayError
 from .remote_signer import _freeze_headers, get_orch_info_sig
 
 _LOG = logging.getLogger(__name__)
+
+# Per-target TOFU certificate cache.
+#
+# Livepeer orchestrators often run with self-signed TLS certificates that are
+# regenerated on process startup. In a trust-on-first-use (TOFU) model we pin
+# the certificate we see on first contact for a target (host:port), then reuse
+# it for subsequent gRPC calls.
+#
+# We intentionally use a dict (not @lru_cache) so we can evict a single target
+# when we detect a restarted orchestrator presenting a new certificate.
+_TOFU_CERT_CACHE: dict[str, Tuple[bytes, str]] = {}
 
 
 @dataclass
@@ -33,16 +43,23 @@ class OrchestratorRpcError(LivepeerGatewayError):
 
 def create_orchestrator_stub(
     orch_url: str,
+    *,
+    use_tofu: bool = True,
 ) -> Tuple[grpc.Channel, lp_rpc_pb2_grpc.OrchestratorStub]:
-    # Always use TLS. "Ignore" invalid/self-signed certs by trusting the exact
-    # certificate the server presents (trust-on-first-use) and overriding the
-    # expected authority to match that cert.
-    root_pem, authority, target = _trust_on_first_use_root_cert(orch_url)
-    credentials = grpc.ssl_channel_credentials(root_certificates=root_pem)
-    options = [
-        ("grpc.ssl_target_name_override", authority),
-        ("grpc.default_authority", authority),
-    ]
+    # Always use TLS. TOFU can be disabled to use gRPC's default CA trust store.
+    target = _parse_grpc_target(orch_url)
+    if use_tofu:
+        # "Ignore" invalid/self-signed certs by trusting the exact certificate
+        # the server presents (trust-on-first-use) and overriding authority.
+        root_pem, authority = _trust_on_first_use_root_cert_target(target)
+        credentials = grpc.ssl_channel_credentials(root_certificates=root_pem)
+        options = [
+            ("grpc.ssl_target_name_override", authority),
+            ("grpc.default_authority", authority),
+        ]
+    else:
+        credentials = grpc.ssl_channel_credentials()
+        options = []
     channel = grpc.secure_channel(target, credentials, options=options)
     stub = lp_rpc_pb2_grpc.OrchestratorStub(channel)
     return channel, stub
@@ -79,6 +96,7 @@ def get_orch_info(
     signer_url: Optional[str] = None,
     signer_headers: Optional[dict[str, str]] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+    use_tofu: bool = True,
 ) -> lp_rpc_pb2.OrchestratorInfo:
     """
     Fetch orchestrator info over gRPC.
@@ -86,13 +104,16 @@ def get_orch_info(
     Public functional API:
         get_orch_info(orch_url, signer_url=...)
     Remote signer is called once per process (cached).
-    Always uses secure channel (TLS) with certificate verification disabled.
+    Always uses a secure gRPC channel (TLS).
+    - With TOFU enabled, it trusts the first observed server certificate per target.
+    - With TOFU disabled, it uses gRPC's default system CA trust roots.
     """
     _LOG.debug(
-        "Fetching orchestrator info orch=%s signer=%s capabilities=%s",
+        "Fetching orchestrator info orch=%s signer=%s capabilities=%s use_tofu=%s",
         orch_url,
         signer_url or "",
         "set" if capabilities is not None else "none",
+        str(use_tofu),
     )
     try:
         signer = get_orch_info_sig(signer_url, _freeze_headers(signer_headers))
@@ -112,8 +133,32 @@ def get_orch_info(
     if capabilities is not None:
         request.capabilities.CopyFrom(capabilities)
 
-    _, stub = create_orchestrator_stub(orch_url)
-    return call_get_orchestrator(stub, request, orch_url)
+    # Retry once on certificate verification failures (TOFU mode only).
+    #
+    # Why this exists:
+    # - TOFU pins the cert we first observed for a target.
+    # - Some orchestrators regenerate self-signed certs on startup.
+    # - After restart, the pinned cert is stale, and gRPC reports
+    #   CERTIFICATE_VERIFY_FAILED during the next RPC.
+    #
+    # On that specific failure we evict the cached TOFU cert for this target
+    # and retry once so we can probe and trust the new certificate.
+    target = _parse_grpc_target(orch_url)
+    max_attempts = 2 if use_tofu else 1
+    for attempt in range(max_attempts):
+        _, stub = create_orchestrator_stub(orch_url, use_tofu=use_tofu)
+        try:
+            return call_get_orchestrator(stub, request, orch_url)
+        except OrchestratorRpcError as e:
+            if use_tofu and attempt == 0 and _is_cert_verify_error(e):
+                _LOG.info(
+                    "Orchestrator %s TLS cert changed (likely restarted); "
+                    "evicting cached TOFU cert and retrying once",
+                    orch_url,
+                )
+                _evict_tofu_cache(target)
+                continue
+            raise
 
 
 def _split_host_port(target: str) -> Tuple[str, int]:
@@ -215,8 +260,19 @@ def _decode_pem_cert(pem: bytes) -> dict:
                 pass
 
 
-@lru_cache(maxsize=None)
-def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
+def _is_cert_verify_error(err: BaseException) -> bool:
+    """
+    Detect gRPC TLS failures caused by a changed orchestrator certificate.
+
+    We are specifically interested in CERTIFICATE_VERIFY_FAILED because it
+    indicates our pinned TOFU cert no longer matches what the orchestrator now
+    presents (commonly after orchestrator restart with a regenerated self-signed
+    cert).
+    """
+    return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+def _fetch_tofu_root_cert_for_target(target: str) -> Tuple[bytes, str]:
     """
     Fetch the server certificate via a TLS handshake with verification disabled,
     then "trust" that exact certificate by using it as the root cert for gRPC.
@@ -246,6 +302,31 @@ def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
     decoded = _decode_pem_cert(pem)
     authority = _pick_cert_authority(decoded) or host
     return pem, authority
+
+
+def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
+    """
+    Return cached TOFU trust material for a target, probing if needed.
+
+    The cache key is the normalized gRPC target (host:port or [ipv6]:port).
+    """
+    cached = _TOFU_CERT_CACHE.get(target)
+    if cached is not None:
+        return cached
+
+    trust_material = _fetch_tofu_root_cert_for_target(target)
+    _TOFU_CERT_CACHE[target] = trust_material
+    return trust_material
+
+
+def _evict_tofu_cache(target: str) -> None:
+    """
+    Evict cached TOFU trust material for a single target.
+
+    This is used on CERTIFICATE_VERIFY_FAILED so the next connection can
+    re-probe the orchestrator and trust its newly generated certificate.
+    """
+    _TOFU_CERT_CACHE.pop(target, None)
 
 
 def _trust_on_first_use_root_cert(orch_url: str) -> Tuple[bytes, str, str]:

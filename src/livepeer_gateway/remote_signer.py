@@ -73,7 +73,7 @@ def get_orch_info_sig(
     Fetch signer material exactly once per (signer_url, headers) combination
     for the lifetime of the process. Subsequent calls return cached data.
     """
-    from .orchestrator import _extract_error_message, _join_signer_endpoint, post_json
+    from .orchestrator import _join_signer_endpoint, post_json
 
     # check for offchain mode
     if not signer_url:
@@ -145,6 +145,7 @@ class PaymentSession(BasePaymentSession):
         signer_headers: Optional[dict[str, str]] = None,
         type: str = "lv2v",
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+        use_tofu: bool = True,
         max_refresh_retries: int = 3,
     ) -> None:
         super().__init__(
@@ -153,6 +154,7 @@ class PaymentSession(BasePaymentSession):
             signer_headers=signer_headers,
             payment_type=type,
             capabilities=capabilities,
+            use_tofu=use_tofu,
             max_refresh_retries=max_refresh_retries,
         )
 

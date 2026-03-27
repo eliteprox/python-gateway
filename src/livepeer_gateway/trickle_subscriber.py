@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
+import time
 from typing import Optional
 
 import aiohttp
@@ -10,6 +12,33 @@ from .segment_reader import SegmentReader
 
 
 _LOG = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class TrickleSubscriberStats:
+    elapsed_s: float
+    get_attempts: int
+    get_retries: int
+    get_404_eos: int
+    get_470_reset: int
+    get_failures: int
+    segments_delivered: int
+    seq_gap_events: int
+    wait_ms_total: int
+
+    def __str__(self) -> str:
+        return (
+            "TrickleSubscriberStats("
+            f"elapsed_s={self.elapsed_s:.1f}, "
+            f"get_attempts={self.get_attempts}, "
+            f"get_retries={self.get_retries}, "
+            f"get_failures={self.get_failures}, "
+            f"get_404_eos={self.get_404_eos}, "
+            f"get_470_reset={self.get_470_reset}, "
+            f"segments_delivered={self.segments_delivered}, "
+            f"seq_gap_events={self.seq_gap_events}, "
+            f"wait_ms_total={self.wait_ms_total}"
+            ")"
+        )
 
 
 class TrickleSubscriber:
@@ -44,6 +73,17 @@ class TrickleSubscriber:
         self._lock: Optional[asyncio.Lock] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._errored = False
+        self._started_at = time.time()
+        self._stats: dict[str, int] = {
+            "get_attempts": 0,
+            "get_retries": 0,
+            "get_404_eos": 0,
+            "get_470_reset": 0,
+            "get_failures": 0,
+            "segments_delivered": 0,
+            "seq_gap_events": 0,
+            "wait_ms_total": 0,
+        }
 
     async def __aenter__(self) -> "TrickleSubscriber":
         return self
@@ -75,9 +115,12 @@ class TrickleSubscriber:
         headers = {"Connection": "close"} if self._connection_close else None
 
         for attempt in range(0, self._max_retries):
+            started = time.time()
+            self._stats["get_attempts"] += 1
             _LOG.debug("Trickle sub preconnect attempt=%s url=%s", attempt, url)
             try:
                 resp = await self._session.get(url, headers=headers)
+                self._stats["wait_ms_total"] += int((time.time() - started) * 1000)
 
                 if resp.status == 200:
                     # Return the response for later processing
@@ -85,12 +128,14 @@ class TrickleSubscriber:
 
                 if resp.status == 404:
                     _LOG.debug("Trickle sub got 404, terminating %s", url)
+                    self._stats["get_404_eos"] += 1
                     resp.release()
                     self._errored = True
                     return None
 
                 if resp.status == 470:
                     # Channel exists but no data at this index, so reset.
+                    self._stats["get_470_reset"] += 1
                     latest = resp.headers.get("Lp-Trickle-Latest") or "-1"
                     try:
                         seq = int(latest)
@@ -104,12 +149,16 @@ class TrickleSubscriber:
 
                 body = await resp.text()
                 resp.release()
+                self._stats["get_failures"] += 1
                 _LOG.error("Trickle sub failed GET %s status=%s msg=%s", url, resp.status, body)
 
             except Exception:
+                self._stats["wait_ms_total"] += int((time.time() - started) * 1000)
+                self._stats["get_failures"] += 1
                 _LOG.exception("Trickle sub failed to complete GET %s", url)
 
             if attempt < self._max_retries - 1:
+                self._stats["get_retries"] += 1
                 await asyncio.sleep(0.5)
 
         _LOG.error("Trickle sub hit max retries, exiting %s", url)
@@ -149,8 +198,12 @@ class TrickleSubscriber:
                 return None
 
             seq = segment.seq()
+            expected_seq = self._seq
             if seq >= 0:
+                if expected_seq >= 0 and seq != expected_seq:
+                    self._stats["seq_gap_events"] += 1
                 self._seq = seq + 1
+            self._stats["segments_delivered"] += 1
 
             # Set up the next connection in the background
             asyncio.create_task(self._preconnect_next_segment())
@@ -190,5 +243,18 @@ class TrickleSubscriber:
                     _LOG.error("Error closing trickle subscriber", exc_info=True)
                 finally:
                     self._session = None
+
+    def get_stats(self) -> TrickleSubscriberStats:
+        return TrickleSubscriberStats(
+            elapsed_s=max(0.0, time.time() - self._started_at),
+            get_attempts=self._stats["get_attempts"],
+            get_retries=self._stats["get_retries"],
+            get_404_eos=self._stats["get_404_eos"],
+            get_470_reset=self._stats["get_470_reset"],
+            get_failures=self._stats["get_failures"],
+            segments_delivered=self._stats["segments_delivered"],
+            seq_gap_events=self._stats["seq_gap_events"],
+            wait_ms_total=self._stats["wait_ms_total"],
+        )
 
 

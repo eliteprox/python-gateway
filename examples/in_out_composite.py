@@ -6,6 +6,7 @@ of input, loopback, output, and an empty tile with latency overlays.
 import argparse
 import asyncio
 from collections import deque
+from dataclasses import asdict
 import logging
 import queue
 import threading
@@ -35,9 +36,9 @@ class _OneLineExceptionFormatter(logging.Formatter):
         return ""
 
 
-def _configure_logging() -> None:
+def _configure_logging(debug: bool = False) -> None:
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if debug else logging.INFO,
         format="%(levelname)s:%(name)s:%(message)s",
         force=True,
     )
@@ -59,6 +60,11 @@ def _parse_args() -> argparse.Namespace:
         "--signer",
         default=None,
         help="Remote signer URL (no path). If omitted, runs in offchain mode.",
+    )
+    p.add_argument(
+        "--discovery",
+        default=None,
+        help="Discovery endpoint for orchestrators.",
     )
     p.add_argument(
         "--billing-url",
@@ -87,28 +93,40 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_DEVICE,
         help=(
             "Camera device index for avfoundation (default: 0). "
-            'List devices with: ffmpeg -f avfoundation -list_devices true -i ""'
+            'List devices with: ffmpeg -f avfoundation -list_devices true -i "". '
+            "Ignored when --input is used."
         ),
     )
     p.add_argument("--fps", type=float, default=DEFAULT_FPS, help="Frames per second (default: 30).")
     p.add_argument(
         "--video-size",
         default=DEFAULT_VIDEO_SIZE,
-        help=f"Capture size (e.g. '1920x1080'). Default: {DEFAULT_VIDEO_SIZE}.",
+        help=f"Capture size (e.g. '1920x1080'). Default: {DEFAULT_VIDEO_SIZE}. Ignored when --input is used.",
     )
     p.add_argument(
         "--pixel-format",
         default=DEFAULT_PIXEL_FORMAT,
         help=(
             "Capture pixel format for avfoundation. "
-            "Supported formats vary by device; common options: uyvy422, yuyv422, nv12."
+            "Supported formats vary by device; common options: uyvy422, yuyv422, nv12. "
+            "Ignored when --input is used."
         ),
+    )
+    p.add_argument(
+        "--input",
+        default=None,
+        help="Path to a local media file. If omitted, captures from camera.",
     )
     p.add_argument(
         "--avg-window",
         type=float,
         default=3.5,
         help="Moving average window in seconds for latency metrics (default: 3.5).",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging.",
     )
     return p.parse_args()
 
@@ -128,6 +146,44 @@ def _capture_frames(
                     frame_queue.put(frame)
             except av.BlockingIOError:
                 continue
+    finally:
+        frame_queue.put(_STOP)
+
+
+def _capture_file_frames(
+    input_: av.container.InputContainer,
+    frame_queue: "queue.Queue[object]",
+    stop_event: threading.Event,
+) -> None:
+    prev_pts: int | None = None
+    prev_wall: float | None = None
+    try:
+        print("Running file capture...")
+        for frame in input_.decode(video=0):
+            if stop_event.is_set():
+                break
+
+            if (
+                prev_pts is not None
+                and prev_wall is not None
+                and frame.pts is not None
+                and frame.time_base is not None
+            ):
+                delta_s = float((frame.pts - prev_pts) * frame.time_base)
+                elapsed_s = time.monotonic() - prev_wall
+                sleep_s = max(0.0, delta_s - elapsed_s)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+            if frame.pts is not None and frame.time_base is not None:
+                prev_pts = frame.pts
+                # Track just before enqueue so next sleep subtracts enqueue/processing cost.
+                prev_wall = time.monotonic()
+            else:
+                prev_pts = None
+                prev_wall = None
+
+            frame_queue.put(frame)
     finally:
         frame_queue.put(_STOP)
 
@@ -187,8 +243,8 @@ def _draw_labels(img, lines):
 
 
 async def main() -> None:
-    _configure_logging()
     args = _parse_args()
+    _configure_logging(debug=args.debug)
 
     try:
         import cv2  # type: ignore[import-not-found]
@@ -203,11 +259,15 @@ async def main() -> None:
 
     job = None
     input_ = None
+    capture_thread: Optional[threading.Thread] = None
     stop_event = threading.Event()
     stop_async = asyncio.Event()
     output_task: Optional[asyncio.Task[None]] = None
     loopback_task: Optional[asyncio.Task[None]] = None
     display_task: Optional[asyncio.Task[None]] = None
+    media = None
+    output_stream: Optional[MediaOutput] = None
+    loopback_stream: Optional[MediaOutput] = None
 
     latest = {
         "cam_img": None,
@@ -263,9 +323,11 @@ async def main() -> None:
             latest["loop_fps"] = _push_fps(loop_frame_times, time.monotonic())
 
     async def _subscribe_output() -> None:
+        nonlocal output_stream
         if job is None:
             return
         async with job.media_output() as output:
+            output_stream = output
             async for decoded in output.frames():
                 if stop_async.is_set():
                     break
@@ -278,9 +340,11 @@ async def main() -> None:
                 _update_out(img, decoded.pts_time)
 
     async def _subscribe_loopback() -> None:
+        nonlocal loopback_stream
         if job is None or not job.publish_url:
             return
         async with MediaOutput(job.publish_url) as loopback:
+            loopback_stream = loopback
             async for decoded in loopback.frames():
                 if stop_async.is_set():
                     break
@@ -386,6 +450,7 @@ async def main() -> None:
             args.orchestrator,
             StartJobRequest(model_id=args.model),
             signer_url=args.signer,
+            discovery_url=args.discovery,
             billing_url=args.billing_url,
             client_id=args.client_id,
             headless=not args.browser,
@@ -396,24 +461,38 @@ async def main() -> None:
         print("subscribe_url:", job.subscribe_url)
         print()
 
-        media = job.start_media(MediaPublishConfig(fps=args.fps))
-
         av.logging.set_level(av.logging.ERROR)
-        input_ = av.open(
-            args.device,
-            format="avfoundation",
-            container_options={
-                "framerate": str(args.fps),
-                "video_size": args.video_size,
-                "pixel_format": args.pixel_format,
-            },
-        )
+        capture_target = _capture_frames
+        capture_name = "CameraCapture"
+        media_fps = args.fps
+        if args.input:
+            input_ = av.open(args.input)
+            if not input_.streams.video:
+                raise LivepeerGatewayError(f"No video stream found in input file: {args.input}")
+            video_stream = input_.streams.video[0]
+            rate = video_stream.average_rate or video_stream.guessed_rate
+            if rate is not None:
+                media_fps = float(rate)
+            capture_target = _capture_file_frames
+            capture_name = "FileCapture"
+        else:
+            input_ = av.open(
+                args.device,
+                format="avfoundation",
+                container_options={
+                    "framerate": str(args.fps),
+                    "video_size": args.video_size,
+                    "pixel_format": args.pixel_format,
+                },
+            )
+
+        media = job.start_media(MediaPublishConfig(fps=media_fps))
 
         frame_queue: "queue.Queue[object]" = queue.Queue(maxsize=8)
         capture_thread = threading.Thread(
-            target=_capture_frames,
+            target=capture_target,
             args=(input_, frame_queue, stop_event),
-            name="CameraCapture",
+            name=capture_name,
             daemon=True,
         )
         capture_thread.start()
@@ -455,6 +534,10 @@ async def main() -> None:
     finally:
         stop_event.set()
         stop_async.set()
+        if capture_thread is not None and capture_thread.is_alive():
+            # Let the capture thread observe stop_event and exit before closing
+            # the input to avoid concurrent decode/close races in PyAV.
+            await asyncio.to_thread(capture_thread.join, 2.0)
         if output_task is not None:
             output_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -472,6 +555,21 @@ async def main() -> None:
                 input_.close()
             except Exception:
                 pass
+        if media is not None:
+            media_stats = media.get_stats()
+            print("\nMedia publish stats:")
+            print(media_stats)
+            print(asdict(media_stats))
+        if output_stream is not None:
+            output_stats = output_stream.get_stats()
+            print("\nOutput stream stats:")
+            print(output_stats)
+            print(asdict(output_stats))
+        if loopback_stream is not None:
+            loopback_stats = loopback_stream.get_stats()
+            print("\nLoopback stream stats:")
+            print(loopback_stats)
+            print(asdict(loopback_stats))
         if job is not None:
             try:
                 await job.close()

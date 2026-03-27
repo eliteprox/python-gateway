@@ -1,17 +1,23 @@
 Generate protobufs:
 
 ```
+uv sync --extra dev
 uv run generate-lp-rpc
 ```
 
-Examples
+## Usage Examples
 
-Offchain mode (no remote signer)
+First install dependencies for example code
+```
+uv sync --extra examples
+```
+
+Get orchestrator info, offchain mode
 ```
 uv run examples/get_orchestrator_info.py localhost:8935
 ```
 
-On-chain mode
+On-chain mode with a remote signer
 
 ```
 uv run examples/get_orchestrator_info.py --signer "<signer-host:port>"
@@ -56,6 +62,10 @@ import json
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
 
 payload = {
+    "orchestrators": [
+        "https://orch-1.example.com:8935",
+        "https://orch-2.example.com:8935",
+    ],
     "signer": "https://signer.example.com",
     "signer_headers": {"Authorization": "Bearer abcdef"},
     "discovery": "https://discovery.example.com",
@@ -67,19 +77,31 @@ job = start_lv2v(
     orch_url=None,
     req=StartJobRequest(model_id="noop"),
     token=token,
+    timeout=5.0,  # timeout for the initial /live-video-to-video request
     # signer_url="https://override-signer.example.com",  # explicit args take precedence
 )
 ```
 
-Token schema (base64-encoded JSON object)
+## Token schema (base64-encoded JSON object)
 
 | Field | Type | Description |
 |---|---|---|
+| `orchestrators` | `string[]` (optional) | Ordered orchestrator addresses to try before discovery |
 | `signer` | `string` (optional) | Signer base URL |
 | `signer_headers` | `{"key": "value"}` (optional) | Extra HTTP headers sent to all signer endpoints |
 | `discovery` | `string` (optional) | Discovery endpoint URL |
 | `discovery_headers` | `{"key": "value"}` (optional) | Extra HTTP headers sent to the discovery endpoint |
 
 Explicit keyword arguments in a function or method always take precedence over token values.
+
+For token payloads, `orchestrators` must be a JSON array of non-empty strings.
+Comma-delimited string format is not supported in the token.
+
+Selection/discovery precedence (highest -> lowest):
+1) explicit `orch_url`
+2) token `orchestrators`
+3) explicit `discovery_url`
+4) token `discovery`
+5) signer-derived discovery endpoint
 
 `signer_headers` are sent with requests to the signer service. `discovery_headers` are only used when an explicit `discovery_url` is provided (and not when using the signer service as a discovery fallback).
