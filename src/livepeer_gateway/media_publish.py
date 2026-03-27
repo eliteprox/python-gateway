@@ -913,10 +913,10 @@ class MediaPublish:
             self._stats["terminal_failures"] += 1
             await self._close_active_segment(mark_completed=False)
             _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
-        except TrickleSegmentWriteError:
+        except TrickleSegmentWriteError as e:
             self._stats["segments_failed"] += 1
             await self._close_active_segment(mark_completed=False)
-            _LOG.warning("MediaPublish dropped segment seq=%s", segment_seq, exc_info=True)
+            _LOG.warning("MediaPublish dropped segment seq=%s reason=%s", segment_seq, e)
         except Exception:
             self._stats["segments_failed"] += 1
             await self._close_active_segment(mark_completed=False)

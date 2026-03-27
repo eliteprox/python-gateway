@@ -339,22 +339,42 @@ class TricklePublisher:
         resp.release()
 
     async def _resolve_next_seq(self) -> int:
-        """Resolve seq via /next, or return -1 on failure."""
+        """Resolve seq via /next, or fall back to seq=0 on failure."""
         assert self._session is not None
         url = f"{self.url}/next"
         try:
             resp = await self._session.get(url)
+            status = resp.status
             latest = resp.headers.get("Lp-Trickle-Latest")
+            body = await resp.text() if status >= 400 else ""
             resp.release()
+
             if latest is not None:
-                resolved_seq = int(latest)
+                try:
+                    resolved_seq = int(latest)
+                except ValueError:
+                    _LOG.debug(
+                        "Trickle /next invalid Lp-Trickle-Latest value=%r; falling back to seq=0",
+                        latest,
+                    )
+                    return 0
                 _LOG.debug("Trickle resolved seq from %s: %s", url, resolved_seq)
                 return resolved_seq
+
+            if status >= 400:
+                _LOG.debug(
+                    "Trickle /next returned status=%s without Lp-Trickle-Latest; "
+                    "falling back to seq=0 body=%r",
+                    status,
+                    body,
+                )
             else:
-                _LOG.warning("Trickle /next missing Lp-Trickle-Latest header")
+                _LOG.debug(
+                    "Trickle /next missing Lp-Trickle-Latest header; falling back to seq=0"
+                )
         except Exception:
-            _LOG.warning("Trickle /next request failed", exc_info=True)
-        return -1
+            _LOG.debug("Trickle /next request failed; falling back to seq=0", exc_info=True)
+        return 0
 
     async def next(self) -> "SegmentWriter":
         # Fail fast via the publisher error hierarchy, not a generic RuntimeError.
@@ -387,18 +407,12 @@ class TricklePublisher:
             self._next_state = None
             self._stats["segments_started"] += 1
 
-            # Preconnect the next segment in the background
+            # Advance sequence for the next SegmentWriter request.
+            # We intentionally avoid eager background preconnect here because
+            # some trickle servers close idle preconnected POSTs before any
+            # request body is written, which then surfaces as "no body consumed"
+            # failures on future segments.
             self.seq += 1
-            if self._preconnect_task_handle is not None and not self._preconnect_task_handle.done():
-                self._preconnect_task_handle.cancel()
-            preconnect_task = asyncio.create_task(self._preconnect_task(self.seq))
-            self._preconnect_task_handle = preconnect_task
-
-            def _clear_preconnect(task: asyncio.Task[None]) -> None:
-                if self._preconnect_task_handle is task:
-                    self._preconnect_task_handle = None
-
-            preconnect_task.add_done_callback(_clear_preconnect)
 
         return SegmentWriter(
             seg_state,
@@ -597,7 +611,13 @@ class SegmentWriter:
             return
         try:
             await asyncio.wait_for(self.queue.put(None), timeout=_SEGMENT_QUEUE_PUT_TIMEOUT_S)
-        # BaseException to also capture cancellation errors, timeout errors, etc
+        except asyncio.TimeoutError:
+            # Expected when request-body consumer is stalled; keep close best-effort.
+            _LOG.debug("Trickle segment close timed out seq=%s", self._seq)
+        except asyncio.CancelledError:
+            # Expected during shutdown/cancellation; keep close best-effort.
+            _LOG.debug("Trickle segment close cancelled seq=%s", self._seq)
+        # BaseException for unexpected shutdown-time failures.
         except BaseException:
             _LOG.warning("Trickle segment close suppressed seq=%s", self._seq, exc_info=True)
 
