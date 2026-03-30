@@ -112,6 +112,7 @@ class StartJobRequest:
 class LiveVideoToVideo:
     raw: dict[str, Any]
     manifest_id: Optional[str] = None
+    signer_url: Optional[str] = None
     publish_url: Optional[str] = None
     subscribe_url: Optional[str] = None
     control_url: Optional[str] = None
@@ -127,6 +128,7 @@ class LiveVideoToVideo:
     def from_json(
         data: dict[str, Any],
         *,
+        signer_url: Optional[str] = None,
         orchestrator_info: Optional[lp_rpc_pb2.OrchestratorInfo] = None,
         payment_session: Optional["PaymentSession"] = None,
     ) -> "LiveVideoToVideo":
@@ -137,6 +139,7 @@ class LiveVideoToVideo:
         events = Events(events_url) if events_url else None
         return LiveVideoToVideo(
             raw=data,
+            signer_url=signer_url,
             control_url=control_url,
             events_url=events_url,
             manifest_id=data.get("manifest_id") if isinstance(data.get("manifest_id"), str) else None,
@@ -415,6 +418,7 @@ def start_lv2v(
             data = post_json(url, req.to_json(), headers=headers, timeout=timeout)
             job = LiveVideoToVideo.from_json(
                 data,
+                signer_url=resolved_signer_url,
                 orchestrator_info=info,
                 payment_session=session,
             )
