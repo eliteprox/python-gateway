@@ -321,13 +321,14 @@ def start_lv2v(
     via ``job.start_payment_sender()``.
 
     Optional ``token`` can be provided as a base64-encoded JSON object.
-    Explicit keyword arguments take precedence over token values.
+    Token values take precedence over explicit keyword arguments.
+    Explicit keyword arguments are used only for fields missing in the token.
 
     Orchestrator selection/discovery precedence (highest -> lowest):
-    1) explicit ``orch_url`` list
-    2) token ``orchestrators`` value
-    3) explicit ``discovery_url`` argument
-    4) token ``discovery`` value
+    1) token ``orchestrators`` value
+    2) explicit ``orch_url`` list
+    3) token ``discovery`` value
+    4) explicit ``discovery_url`` argument
     5) remote signer discovery endpoint derived from the resolved signer URL
 
     ``timeout`` controls only the initial HTTP POST to
@@ -341,27 +342,34 @@ def start_lv2v(
     if not req.model_id:
         raise LivepeerGatewayError("start_lv2v requires model_id")
 
-    resolved_orch_url = orch_url
-    resolved_signer_url = signer_url
-    resolved_signer_headers = signer_headers
-    resolved_discovery_url = discovery_url
-    resolved_discovery_headers = discovery_headers
+    token_data: Optional[dict[str, Any]] = None
     if token is not None:
         token_data = _parse_token(token)
-        if resolved_orch_url is None:
-            resolved_orch_url = token_data.get("orchestrators")
-        if resolved_signer_url is None:
-            resolved_signer_url = token_data.get("signer")
-        if resolved_signer_headers is None:
-            resolved_signer_headers = token_data.get("signer_headers")
-        if resolved_discovery_url is None:
-            resolved_discovery_url = token_data.get("discovery")
-        if resolved_discovery_headers is None:
-            resolved_discovery_headers = token_data.get("discovery_headers")
+
+    resolved_orch_url = token_data.get("orchestrators") if token_data else None
+    if resolved_orch_url is None:
+        resolved_orch_url = orch_url
+
+    resolved_signer_url = token_data.get("signer") if token_data else None
+    if resolved_signer_url is None:
+        resolved_signer_url = signer_url
+
+    resolved_signer_headers = token_data.get("signer_headers") if token_data else None
+    if resolved_signer_headers is None:
+        resolved_signer_headers = signer_headers
+
+    resolved_discovery_url = token_data.get("discovery") if token_data else None
+    if resolved_discovery_url is None:
+        resolved_discovery_url = discovery_url
+
+    resolved_discovery_headers = token_data.get("discovery_headers") if token_data else None
+    if resolved_discovery_headers is None:
+        resolved_discovery_headers = discovery_headers
 
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, req.model_id)
-    # Orchestrator discovery precedence:
-    # orch_url -> token orchestrators -> discovery_url -> token discovery -> signer_url
+    # Orchestrator discovery precedence after token-first field resolution:
+    # token orchestrators -> explicit orch_url -> token discovery ->
+    # explicit discovery_url -> signer_url
     cursor = orchestrator_selector(
         resolved_orch_url,
         signer_url=resolved_signer_url,

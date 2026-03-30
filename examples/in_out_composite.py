@@ -63,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--token",
         default=None,
-        help="Base64-encoded gateway token used to resolve signer/discovery/orchestrators.",
+        help="Base64-encoded gateway token; token fields override explicit signer/discovery/orchestrator args.",
     )
     p.add_argument(
         "--discovery",

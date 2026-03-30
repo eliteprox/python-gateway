@@ -78,7 +78,7 @@ job = start_lv2v(
     req=StartJobRequest(model_id="noop"),
     token=token,
     timeout=5.0,  # timeout for the initial /live-video-to-video request
-    # signer_url="https://override-signer.example.com",  # explicit args take precedence
+    # signer_url="https://fallback-signer.example.com",  # used only if token omits signer
 )
 ```
 
@@ -92,16 +92,17 @@ job = start_lv2v(
 | `discovery` | `string` (optional) | Discovery endpoint URL |
 | `discovery_headers` | `{"key": "value"}` (optional) | Extra HTTP headers sent to the discovery endpoint |
 
-Explicit keyword arguments in a function or method always take precedence over token values.
+Token values take precedence over explicit keyword arguments.
+Explicit keyword arguments are used only for fields missing in the token.
 
 For token payloads, `orchestrators` must be a JSON array of non-empty strings.
 Comma-delimited string format is not supported in the token.
 
 Selection/discovery precedence (highest -> lowest):
-1) explicit `orch_url`
-2) token `orchestrators`
-3) explicit `discovery_url`
-4) token `discovery`
+1) token `orchestrators`
+2) explicit `orch_url`
+3) token `discovery`
+4) explicit `discovery_url`
 5) signer-derived discovery endpoint
 
 `signer_headers` are sent with requests to the signer service. `discovery_headers` are only used when an explicit `discovery_url` is provided (and not when using the signer service as a discovery fallback).
