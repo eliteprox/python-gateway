@@ -10,3 +10,5 @@ __pycache__/
 # Generated files
 lp_rpc.proto
 
+# environment file
+env

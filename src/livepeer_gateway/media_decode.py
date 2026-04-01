@@ -13,6 +13,7 @@ import av
 @dataclass(frozen=True)
 class DecodedMediaFrame:
     kind: str
+    stream_index: int
     frame: Union[av.VideoFrame, av.AudioFrame]
     pts: Optional[int]
     time_base: Optional[Fraction]
@@ -123,6 +124,7 @@ def _time_from_pts(pts: Optional[int], time_base: Optional[Fraction]) -> Optiona
 def _build_decoded_frame(
     frame: Union[av.VideoFrame, av.AudioFrame],
     *,
+    stream_index: int,
     demuxed_at: float,
     decoded_at: float,
 ) -> AudioDecodedMediaFrame | VideoDecodedMediaFrame:
@@ -133,6 +135,7 @@ def _build_decoded_frame(
     if isinstance(frame, av.VideoFrame):
         return VideoDecodedMediaFrame(
             kind="video",
+            stream_index=stream_index,
             frame=frame,
             pts=pts,
             time_base=time_base,
@@ -146,6 +149,7 @@ def _build_decoded_frame(
 
     return AudioDecodedMediaFrame(
         kind="audio",
+        stream_index=stream_index,
         frame=frame,
         pts=pts,
         time_base=time_base,
@@ -196,6 +200,7 @@ class MpegTsDecoder:
                 demuxed_at = time.time()
                 if packet is None:
                     continue
+                stream_index = getattr(packet.stream, "index", -1)
                 try:
                     frames = packet.decode()
                 except Exception as e:
@@ -205,6 +210,7 @@ class MpegTsDecoder:
                     decoded_at = time.time()
                     decoded = _build_decoded_frame(
                         frame,
+                        stream_index=stream_index,
                         demuxed_at=demuxed_at,
                         decoded_at=decoded_at,
                     )

@@ -4,7 +4,15 @@ from .channel_writer import ChannelWriter, JSONLWriter
 from .control import Control, ControlConfig, ControlMode
 from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, PaymentError
 from .events import Events
-from .media_publish import MediaPublish, MediaPublishConfig, MediaPublishStats
+from .media_publish import (
+    AudioOutputConfig,
+    MediaPublish,
+    MediaPublishConfig,
+    MediaPublishTrack,
+    MediaPublishStats,
+    TrackQueueStats,
+    VideoOutputConfig,
+)
 from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
 from .media_output import MediaOutput, MediaOutputStats
 from .errors import OrchestratorRejection
@@ -39,7 +47,11 @@ __all__ = [
     "PaymentError",
     "MediaPublish",
     "MediaPublishConfig",
+    "MediaPublishTrack",
     "MediaPublishStats",
+    "TrackQueueStats",
+    "VideoOutputConfig",
+    "AudioOutputConfig",
     "MediaOutput",
     "MediaOutputStats",
     "AudioDecodedMediaFrame",

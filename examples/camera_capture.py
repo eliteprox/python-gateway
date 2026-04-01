@@ -13,7 +13,7 @@ import av
 
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
-from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.media_publish import MediaPublishConfig, VideoOutputConfig
 
 DEFAULT_MODEL_ID = "noop" # fix
 DEFAULT_DEVICE = "0"
@@ -219,7 +219,11 @@ async def main() -> None:
                 },
             )
 
-        media = job.start_media(MediaPublishConfig(fps=media_fps))
+        media = job.start_media(
+            MediaPublishConfig(
+                tracks=[VideoOutputConfig(fps=media_fps)],
+            )
+        )
         if args.output:
             output_task = asyncio.create_task(_write_media_output(job, args.output))
 

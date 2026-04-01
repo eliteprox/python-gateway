@@ -6,7 +6,7 @@ import av
 
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
-from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.media_publish import MediaPublishConfig, VideoOutputConfig
 
 DEFAULT_MODEL_ID = "noop"  # fix
 
@@ -59,7 +59,11 @@ async def main() -> None:
         print("publish_url:", job.publish_url)
         print()
 
-        media = job.start_media(MediaPublishConfig(fps=args.fps))
+        media = job.start_media(
+            MediaPublishConfig(
+                tracks=[VideoOutputConfig(fps=args.fps)],
+            )
+        )
 
         time_base = Fraction(1, int(round(args.fps)))
         for i in range(max(0, args.count)):

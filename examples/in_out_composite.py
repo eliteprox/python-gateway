@@ -18,7 +18,7 @@ import av
 
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
-from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.media_publish import AudioOutputConfig, MediaPublishConfig, VideoOutputConfig
 from livepeer_gateway.media_output import MediaOutput
 
 DEFAULT_MODEL_ID = "noop"  # fix
@@ -142,32 +142,44 @@ def _capture_file_frames(
     frame_queue: "queue.Queue[object]",
     stop_event: threading.Event,
 ) -> None:
-    prev_pts: int | None = None
+    prev_pts_time: float | None = None
     prev_wall: float | None = None
     try:
         print("Running file capture...")
-        for frame in input_.decode(video=0):
+
+        # Determine which streams should be decoded (skip any data streams)
+        decode_kwargs: dict[str, int] = {"video": 0}
+        if input_.streams.audio:
+            decode_kwargs["audio"] = 0
+
+        # Go.
+        for frame in input_.decode(**decode_kwargs):
             if stop_event.is_set():
                 break
 
+            # Convert per-track PTS into seconds so pacing works across
+            # streams that have different time bases.
+            current_pts_time: Optional[float] = None
+            if frame.pts is not None and frame.time_base is not None:
+                current_pts_time = float(frame.pts * frame.time_base)
+
             if (
-                prev_pts is not None
+                prev_pts_time is not None
                 and prev_wall is not None
-                and frame.pts is not None
-                and frame.time_base is not None
+                and current_pts_time is not None
             ):
-                delta_s = float((frame.pts - prev_pts) * frame.time_base)
+                delta_s = current_pts_time - prev_pts_time
                 elapsed_s = time.monotonic() - prev_wall
                 sleep_s = max(0.0, delta_s - elapsed_s)
                 if sleep_s > 0:
                     time.sleep(sleep_s)
 
-            if frame.pts is not None and frame.time_base is not None:
-                prev_pts = frame.pts
+            if current_pts_time is not None:
+                prev_pts_time = current_pts_time
                 # Track just before enqueue so next sleep subtracts enqueue/processing cost.
                 prev_wall = time.monotonic()
             else:
-                prev_pts = None
+                prev_pts_time = None
                 prev_wall = None
 
             frame_queue.put(frame)
@@ -450,6 +462,8 @@ async def main() -> None:
         capture_target = _capture_frames
         capture_name = "CameraCapture"
         media_fps = args.fps
+        is_file_input = bool(args.input)
+        media_tracks: list[VideoOutputConfig | AudioOutputConfig] = []
         if args.input:
             input_ = av.open(args.input)
             if not input_.streams.video:
@@ -458,6 +472,21 @@ async def main() -> None:
             rate = video_stream.average_rate or video_stream.guessed_rate
             if rate is not None:
                 media_fps = float(rate)
+            media_tracks.append(VideoOutputConfig(fps=media_fps))
+            if input_.streams.audio:
+                audio_stream = input_.streams.audio[0]
+                audio_layout = "mono"
+                if audio_stream.layout is not None and audio_stream.layout.name:
+                    audio_layout = str(audio_stream.layout.name)
+                audio_sample_rate = int(getattr(audio_stream, "rate", 0) or 0)
+                if audio_sample_rate <= 0:
+                    audio_sample_rate = 48_000
+                media_tracks.append(
+                    AudioOutputConfig(
+                        sample_rate=audio_sample_rate,
+                        layout=audio_layout,
+                    )
+                )
             capture_target = _capture_file_frames
             capture_name = "FileCapture"
         else:
@@ -470,8 +499,9 @@ async def main() -> None:
                     "pixel_format": args.pixel_format,
                 },
             )
+            media_tracks.append(VideoOutputConfig(fps=media_fps))
 
-        media = job.start_media(MediaPublishConfig(fps=media_fps))
+        media = job.start_media(MediaPublishConfig(tracks=media_tracks))
 
         frame_queue: "queue.Queue[object]" = queue.Queue(maxsize=8)
         capture_thread = threading.Thread(
@@ -496,22 +526,31 @@ async def main() -> None:
             if item is _STOP:
                 break
             frame = item
-            now = time.time()
-            if last_time is not None:
-                last_pts += int((now - last_time) * _TIME_BASE)
-            else:
-                last_pts = 0
-            last_time = now
+            if isinstance(frame, av.VideoFrame):
+                if not is_file_input:
+                    now = time.time()
+                    if last_time is not None:
+                        last_pts += int((now - last_time) * _TIME_BASE)
+                    else:
+                        last_pts = 0
+                    last_time = now
+                    frame.pts = last_pts
+                    frame.time_base = time_base
+                    cam_pts_time = last_pts / _TIME_BASE
+                else:
+                    cam_pts_time = None
+                    if frame.pts is not None and frame.time_base is not None:
+                        cam_pts_time = float(frame.pts * frame.time_base)
+                try:
+                    cam_img = _bgr_from_frame(frame)
+                    _update_cam(cam_img, cam_pts_time)
+                except Exception:
+                    _update_cam(None, cam_pts_time)
+                await media.write_frame(frame)
+                continue
 
-            frame.pts = last_pts
-            frame.time_base = time_base
-            cam_pts_time = last_pts / _TIME_BASE
-            try:
-                cam_img = _bgr_from_frame(frame)
-                _update_cam(cam_img, cam_pts_time)
-            except Exception:
-                _update_cam(None, cam_pts_time)
-            await media.write_frame(frame)
+            if isinstance(frame, av.AudioFrame):
+                await media.write_frame(frame)
     except KeyboardInterrupt:
         print("Recording stopped by user")
     except LivepeerGatewayError as e:
