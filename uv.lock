@@ -705,7 +705,7 @@ wheels = [
 
 [[package]]
 name = "livepeer-gateway"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -736,6 +736,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "numpy", marker = "extra == 'examples'", specifier = ">=2.2.6" },
     { name = "opencv-python-headless", marker = "extra == 'examples'", specifier = ">=4.13.0.90" },
+    { name = "protobuf" },
     { name = "protobuf", specifier = ">=4.25.0" },
 ]
 provides-extras = ["dev", "examples"]

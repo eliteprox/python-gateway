@@ -4,9 +4,11 @@ import asyncio
 import base64
 import json
 import logging
+import numbers
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
@@ -17,12 +19,14 @@ from .errors import (
     LivepeerGatewayError,
     NoOrchestratorAvailableError,
     OrchestratorRejection,
+    PaymentError,
     SkipPaymentCycle,
 )
 from .events import Events
 from .media_output import LagPolicy, MediaOutput
 from .media_publish import MediaPublish, MediaPublishConfig
-from .orchestrator import _extract_error_message, _http_origin
+from .orch_info import get_orch_info as _get_orch_info
+from .orchestrator import _extract_error_message, resolve_transcoder_http_url
 from .selection import orchestrator_selector
 
 _LOG = logging.getLogger(__name__)
@@ -34,6 +38,106 @@ def _header_get(headers: dict[str, str], key: str) -> Optional[str]:
         if name.lower() == key_lower:
             return value
     return None
+
+
+def _field_value(obj: Any, snake: str, camel: str) -> Any:
+    if isinstance(obj, dict):
+        if snake in obj:
+            return obj[snake]
+        if camel in obj:
+            return obj[camel]
+        return None
+    v = getattr(obj, snake, None)
+    if v is not None:
+        return v
+    return getattr(obj, camel, None)
+
+
+def _nonzero_real_scalar(val: Any) -> bool:
+    if val is None or isinstance(val, bool):
+        return False
+    if isinstance(val, bytes):
+        if not val:
+            return False
+        return int.from_bytes(val, "big") > 0
+    if isinstance(val, numbers.Real):
+        return val != 0
+    return False
+
+
+def _orch_info_ticket_params_usable(info: Any) -> bool:
+    """True when ticket_params has non-zero face_value and win_prob (snake_case or camelCase)."""
+    params = getattr(info, "ticket_params", None)
+    if params is None:
+        return False
+    face = _field_value(params, "face_value", "faceValue")
+    win = _field_value(params, "win_prob", "winProb")
+    return _nonzero_real_scalar(face) and _nonzero_real_scalar(win)
+
+
+def _price_info_matches_byoc(price_info: Any, capability_name: str) -> bool:
+    if price_info is None:
+        return False
+    capability = _field_value(price_info, "capability", "capability")
+    constraint = _field_value(price_info, "constraint", "constraint")
+    price_per_unit = _field_value(price_info, "price_per_unit", "pricePerUnit")
+    pixels_per_unit = _field_value(price_info, "pixels_per_unit", "pixelsPerUnit")
+    return (
+        capability == int(CapabilityId.BYOC)
+        and constraint == capability_name
+        and _nonzero_real_scalar(price_per_unit)
+        and _nonzero_real_scalar(pixels_per_unit)
+    )
+
+
+def _orch_info_has_byoc_price(info: Any, capability_name: str) -> bool:
+    top_price = _field_value(info, "price_info", "priceInfo")
+    if _price_info_matches_byoc(top_price, capability_name):
+        return True
+
+    caps_prices = _field_value(info, "capabilities_prices", "capabilitiesPrices")
+    if caps_prices is None:
+        return False
+    for price_info in caps_prices:
+        if _price_info_matches_byoc(price_info, capability_name):
+            return True
+    return False
+
+
+def _orch_info_supports_byoc_payment(info: Any, capability_name: str) -> bool:
+    return _orch_info_ticket_params_usable(info) and _orch_info_has_byoc_price(info, capability_name)
+
+
+def _get_payment_orch_info(
+    orch_url: str,
+    *,
+    signer_url: Optional[str],
+    signer_headers: Optional[dict[str, str]],
+    capabilities: Any,
+    capability_name: str,
+) -> tuple[Any, Any]:
+    payment_info = _get_orch_info(
+        orch_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+        capabilities=capabilities,
+    )
+    if _orch_info_supports_byoc_payment(payment_info, capability_name):
+        return payment_info, capabilities
+
+    legacy_info = _get_orch_info(
+        orch_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+    )
+    if _orch_info_supports_byoc_payment(legacy_info, capability_name):
+        _LOG.debug(
+            "BYOC payment preflight: using legacy orch info response for %s",
+            capability_name,
+        )
+        return legacy_info, None
+
+    return payment_info, capabilities
 
 
 @dataclass(frozen=True)
@@ -48,6 +152,11 @@ class BYOCJobRequest:
     enable_video_ingress: bool = True
     enable_video_egress: bool = True
     enable_data_output: bool = False
+    # Orchestrator default in go-livepeer is POST {transcoder}/ai/stream/start; the
+    # gateway uses /process/stream/start. Either a path on the selected transcoder
+    # origin or a full http(s) URL (e.g. gateway or direct worker base).
+    stream_start_endpoint: str = "/ai/stream/start"
+    stream_payment_endpoint: str = "/ai/stream/payment"
 
     def _job_id(self) -> str:
         if self.request_id and self.request_id.strip():
@@ -96,6 +205,8 @@ class BYOCJob:
     _payment_session: Optional[BYOCPaymentSession] = field(default=None, repr=False, compare=False)
     _signed_job_header: Optional[str] = field(default=None, repr=False, compare=False)
     _payment_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
+    _stream_stop_url: Optional[str] = field(default=None, repr=False, compare=False)
+    _stop_timeout_s: float = field(default=30.0, repr=False, compare=False)
 
     @staticmethod
     def from_start_response(
@@ -105,6 +216,8 @@ class BYOCJob:
         capability: str,
         payment_session: Optional[BYOCPaymentSession] = None,
         signed_job_header: Optional[str] = None,
+        stream_stop_url: Optional[str] = None,
+        stop_timeout_s: float = 30.0,
     ) -> "BYOCJob":
         headers = data.get("headers")
         if not isinstance(headers, dict):
@@ -129,18 +242,15 @@ class BYOCJob:
             events=Events(events_url) if events_url else None,
             _payment_session=payment_session,
             _signed_job_header=signed_job_header,
+            _stream_stop_url=stream_stop_url,
+            _stop_timeout_s=stop_timeout_s,
         )
 
     def start_media(self, config: MediaPublishConfig) -> MediaPublish:
         if not self.publish_url:
             raise LivepeerGatewayError("No publish_url present on this BYOC job")
         if self._media is None:
-            media = MediaPublish(
-                self.publish_url,
-                mime_type=config.mime_type,
-                keyframe_interval_s=config.keyframe_interval_s,
-                fps=config.fps,
-            )
+            media = MediaPublish(self.publish_url, config=config)
             object.__setattr__(self, "_media", media)
         return self._media
 
@@ -196,6 +306,19 @@ class BYOCJob:
         object.__setattr__(self, "_payment_task", task)
         return task
 
+    async def stop(self) -> dict[str, Any]:
+        if not self._stream_stop_url:
+            raise LivepeerGatewayError("No stream stop URL present on this BYOC job")
+        if not self._signed_job_header:
+            raise LivepeerGatewayError("No signed job header present on this BYOC job")
+        return await asyncio.to_thread(
+            _post_byoc_stop,
+            self._stream_stop_url,
+            payload={"stream_id": self.job_id},
+            headers={"Livepeer": self._signed_job_header},
+            timeout=self._stop_timeout_s,
+        )
+
     async def close(self) -> None:
         tasks = []
         payment_task = getattr(self, "_payment_task", None)
@@ -203,7 +326,7 @@ class BYOCJob:
             payment_task.cancel()
             tasks.append(payment_task)
         if self.control is not None:
-            tasks.append(self.control.close_control())
+            tasks.append(self.control.close())
         if self._media is not None:
             tasks.append(self._media.close())
         if not tasks:
@@ -220,6 +343,13 @@ async def _byoc_payment_sender(
     *,
     interval_s: float,
 ) -> None:
+    try:
+        await asyncio.to_thread(session.send_stream_payment, signed_job_header)
+    except SkipPaymentCycle as e:
+        _LOG.debug("BYOC payment sender: first payment skipped (%s)", e)
+    except Exception:
+        _LOG.exception("BYOC payment sender: first immediate payment failed")
+
     while True:
         await asyncio.sleep(interval_s)
         try:
@@ -280,6 +410,69 @@ def _post_byoc_start(
     return {"status_code": status, "headers": response_headers, "body": body}
 
 
+def _post_byoc_stop(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+) -> dict[str, Any]:
+    req_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "livepeer-python-gateway/0.1",
+    }
+    req_headers.update(headers)
+
+    try:
+        with httpx.Client(verify=False, timeout=timeout) as client:
+            resp = client.post(url, content=json.dumps(payload).encode("utf-8"), headers=req_headers)
+        if resp.status_code >= 400:
+            body = _extract_error_message(resp)
+            body_part = f"; body={body!r}" if body else ""
+            raise LivepeerGatewayError(
+                f"HTTP BYOC stop error: HTTP {resp.status_code} from endpoint (url={url}){body_part}"
+            )
+        raw_body = resp.text
+        response_headers = dict(resp.headers.items())
+        status = resp.status_code
+    except LivepeerGatewayError:
+        raise
+    except httpx.ConnectError as e:
+        raise LivepeerGatewayError(
+            f"HTTP BYOC stop error: connection refused (is the server running? is the host/port correct?) (url={url})"
+        ) from e
+    except httpx.HTTPError as e:
+        raise LivepeerGatewayError(
+            f"HTTP BYOC stop error: failed to reach endpoint: {e} (url={url})"
+        ) from e
+    except Exception as e:
+        raise LivepeerGatewayError(
+            f"HTTP BYOC stop error: unexpected error: {e.__class__.__name__}: {e} (url={url})"
+        ) from e
+
+    body: Any = None
+    if raw_body.strip():
+        try:
+            body = json.loads(raw_body)
+        except Exception:
+            body = raw_body
+    return {"status_code": status, "headers": response_headers, "body": body}
+
+
+def _derive_stream_stop_url(start_url: str, job_id: str) -> str:
+    parsed = urlparse(start_url)
+    path = parsed.path or ""
+    quoted_job_id = quote(job_id, safe="")
+    if path.endswith("/process/stream/start"):
+        path = path[: -len("/process/stream/start")] + f"/process/stream/{quoted_job_id}/stop"
+    elif path.endswith("/start"):
+        path = path[: -len("/start")] + "/stop"
+    else:
+        raise ValueError(f"Cannot derive stream stop URL from start URL: {start_url!r}")
+    return urlunparse(parsed._replace(path=path))
+
+
 def start_byoc_job(
     orch_url: Optional[Sequence[str] | str],
     req: BYOCJobRequest,
@@ -292,6 +485,10 @@ def start_byoc_job(
 ) -> BYOCJob:
     if not isinstance(req.capability, str) or not req.capability.strip():
         raise LivepeerGatewayError("start_byoc_job requires a non-empty capability")
+    if not isinstance(req.stream_start_endpoint, str) or not req.stream_start_endpoint.strip():
+        raise LivepeerGatewayError("BYOCJobRequest.stream_start_endpoint must be non-empty")
+    if not isinstance(req.stream_payment_endpoint, str) or not req.stream_payment_endpoint.strip():
+        raise LivepeerGatewayError("BYOCJobRequest.stream_payment_endpoint must be non-empty")
 
     resolved_signer_url = signer_url
     resolved_signer_headers = signer_headers
@@ -334,18 +531,33 @@ def start_byoc_job(
             raise
 
         try:
-            session = BYOCPaymentSession(
-                resolved_signer_url,
-                info,
-                capability_name=req.capability.strip(),
+            payment_info, payment_capabilities = _get_payment_orch_info(
+                selected_url,
+                signer_url=resolved_signer_url,
                 signer_headers=resolved_signer_headers,
                 capabilities=capabilities,
+                capability_name=req.capability.strip(),
+            )
+
+            session = BYOCPaymentSession(
+                resolved_signer_url,
+                payment_info,
+                capability_name=req.capability.strip(),
+                signer_headers=resolved_signer_headers,
+                capabilities=payment_capabilities,
+                stream_payment_endpoint=req.stream_payment_endpoint,
             )
 
             job_id = req._job_id()
             request_json = req._request_json(job_id)
             parameters_json = req._parameters_json()
-            signed = session.sign_byoc_job(request_json, parameters_json)
+            signed = session.sign_byoc_job(
+                job_id=job_id,
+                capability=req.capability.strip(),
+                request=request_json,
+                parameters=parameters_json,
+                timeout_seconds=max(1, int(req.timeout_seconds)),
+            )
 
             signed_payload = {
                 "id": job_id,
@@ -360,15 +572,50 @@ def start_byoc_job(
                 json.dumps(signed_payload, separators=(",", ":")).encode("utf-8")
             ).decode("ascii")
 
-            payment = session.get_payment()
-            headers = {
-                "Livepeer": signed_job_header,
-                "Livepeer-Payment": payment.payment,
-                "Livepeer-Segment": payment.seg_creds or "",
-            }
-            base = _http_origin(info.transcoder)
+            payment_header: Optional[str] = None
+            segment_header = ""
+            try:
+                payment = session.get_payment()
+                payment_header = payment.payment
+                segment_header = payment.seg_creds or ""
+            except SkipPaymentCycle as pay_skip:
+                if not _orch_info_ticket_params_usable(payment_info):
+                    raise LivepeerGatewayError(
+                        "BYOC signer returned skip-payment, but OrchestratorInfo ticket_params "
+                        "are missing or zero (face_value and win_prob are required). "
+                        "Ticket expected value (EV) cannot be computed; refusing to start."
+                    ) from pay_skip
+                _LOG.debug("BYOC signer returned skip-payment response on start (%s)", pay_skip)
+            except (PaymentError, LivepeerGatewayError) as pay_err:
+                msg = str(pay_err)
+                if "priceInfo" in msg.lower() or "price" in msg.lower():
+                    raise LivepeerGatewayError(
+                        f"BYOC signer pricing error: the remote signer rejected payment generation "
+                        f"(likely missing or zero priceInfo in OrchestratorInfo for capability "
+                        f"'{req.capability.strip()}'). Ensure the orchestrator advertises "
+                        f"capability-specific pricing for BYOC/{req.capability.strip()}. "
+                        f"Signer detail: {msg}"
+                    ) from pay_err
+                raise
+
+            if payment_header is not None and not payment_header:
+                raise LivepeerGatewayError(
+                    f"BYOC signer returned empty payment ticket for capability "
+                    f"'{req.capability.strip()}'. Check signer configuration and "
+                    f"orchestrator pricing for BYOC/{req.capability.strip()}."
+                )
+
+            headers = {"Livepeer": signed_job_header}
+            if payment_header:
+                headers["Livepeer-Payment"] = payment_header
+                headers["Livepeer-Segment"] = segment_header
+            start_url = resolve_transcoder_http_url(info.transcoder, req.stream_start_endpoint)
+            try:
+                stop_url = _derive_stream_stop_url(start_url, job_id)
+            except ValueError as e:
+                raise LivepeerGatewayError(str(e)) from e
             data = _post_byoc_start(
-                f"{base}/ai/stream/start",
+                start_url,
                 payload=req._body(job_id),
                 headers=headers,
                 timeout=float(max(1, int(req.timeout_seconds))),
@@ -379,6 +626,8 @@ def start_byoc_job(
                 capability=req.capability.strip(),
                 payment_session=session,
                 signed_job_header=signed_job_header,
+                stream_stop_url=stop_url,
+                stop_timeout_s=float(max(1, int(req.timeout_seconds))),
             )
             job.start_payment_sender()
             return job
