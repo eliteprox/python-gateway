@@ -20,6 +20,7 @@ from .errors import (
     NoOrchestratorAvailableError,
     OrchestratorRejection,
     PaymentError,
+    PaymentRequiredError,
     SkipPaymentCycle,
 )
 from .events import Events
@@ -360,6 +361,56 @@ async def _byoc_payment_sender(
             _LOG.exception("BYOC payment sender failed")
 
 
+def _get_start_payment_headers(
+    session: BYOCPaymentSession,
+    *,
+    payment_info: Any,
+    capability_name: str,
+    allow_skip: bool,
+) -> tuple[Optional[str], str]:
+    payment_header: Optional[str] = None
+    segment_header = ""
+
+    try:
+        payment = session.get_payment()
+        payment_header = payment.payment
+        segment_header = payment.seg_creds or ""
+    except SkipPaymentCycle as pay_skip:
+        if not allow_skip:
+            raise LivepeerGatewayError(
+                "BYOC start endpoint returned HTTP 402 payment required, "
+                "but the signer skipped payment generation; cannot retry start "
+                "without a payment ticket."
+            ) from pay_skip
+        if not _orch_info_ticket_params_usable(payment_info):
+            raise LivepeerGatewayError(
+                "BYOC signer returned skip-payment, but OrchestratorInfo ticket_params "
+                "are missing or zero (face_value and win_prob are required). "
+                "Ticket expected value (EV) cannot be computed; refusing to start."
+            ) from pay_skip
+        _LOG.debug("BYOC signer returned skip-payment response on start (%s)", pay_skip)
+    except (PaymentError, LivepeerGatewayError) as pay_err:
+        msg = str(pay_err)
+        if "priceInfo" in msg.lower() or "price" in msg.lower():
+            raise LivepeerGatewayError(
+                f"BYOC signer pricing error: the remote signer rejected payment generation "
+                f"(likely missing or zero priceInfo in OrchestratorInfo for capability "
+                f"'{capability_name}'). Ensure the orchestrator advertises "
+                f"capability-specific pricing for BYOC/{capability_name}. "
+                f"Signer detail: {msg}"
+            ) from pay_err
+        raise
+
+    if payment_header is not None and not payment_header:
+        raise LivepeerGatewayError(
+            f"BYOC signer returned empty payment ticket for capability "
+            f"'{capability_name}'. Check signer configuration and "
+            f"orchestrator pricing for BYOC/{capability_name}."
+        )
+
+    return payment_header, segment_header
+
+
 def _post_byoc_start(
     url: str,
     *,
@@ -380,6 +431,10 @@ def _post_byoc_start(
         if resp.status_code >= 400:
             body = _extract_error_message(resp)
             body_part = f"; body={body!r}" if body else ""
+            if resp.status_code == 402:
+                raise PaymentRequiredError(
+                    f"HTTP BYOC start error: HTTP 402 from endpoint (url={url}){body_part}"
+                )
             raise LivepeerGatewayError(
                 f"HTTP BYOC start error: HTTP {resp.status_code} from endpoint (url={url}){body_part}"
             )
@@ -572,39 +627,13 @@ def start_byoc_job(
                 json.dumps(signed_payload, separators=(",", ":")).encode("utf-8")
             ).decode("ascii")
 
-            payment_header: Optional[str] = None
-            segment_header = ""
-            try:
-                payment = session.get_payment()
-                payment_header = payment.payment
-                segment_header = payment.seg_creds or ""
-            except SkipPaymentCycle as pay_skip:
-                if not _orch_info_ticket_params_usable(payment_info):
-                    raise LivepeerGatewayError(
-                        "BYOC signer returned skip-payment, but OrchestratorInfo ticket_params "
-                        "are missing or zero (face_value and win_prob are required). "
-                        "Ticket expected value (EV) cannot be computed; refusing to start."
-                    ) from pay_skip
-                _LOG.debug("BYOC signer returned skip-payment response on start (%s)", pay_skip)
-            except (PaymentError, LivepeerGatewayError) as pay_err:
-                msg = str(pay_err)
-                if "priceInfo" in msg.lower() or "price" in msg.lower():
-                    raise LivepeerGatewayError(
-                        f"BYOC signer pricing error: the remote signer rejected payment generation "
-                        f"(likely missing or zero priceInfo in OrchestratorInfo for capability "
-                        f"'{req.capability.strip()}'). Ensure the orchestrator advertises "
-                        f"capability-specific pricing for BYOC/{req.capability.strip()}. "
-                        f"Signer detail: {msg}"
-                    ) from pay_err
-                raise
-
-            if payment_header is not None and not payment_header:
-                raise LivepeerGatewayError(
-                    f"BYOC signer returned empty payment ticket for capability "
-                    f"'{req.capability.strip()}'. Check signer configuration and "
-                    f"orchestrator pricing for BYOC/{req.capability.strip()}."
-                )
-
+            capability_name = req.capability.strip()
+            payment_header, segment_header = _get_start_payment_headers(
+                session,
+                payment_info=payment_info,
+                capability_name=capability_name,
+                allow_skip=True,
+            )
             headers = {"Livepeer": signed_job_header}
             if payment_header:
                 headers["Livepeer-Payment"] = payment_header
@@ -614,16 +643,38 @@ def start_byoc_job(
                 stop_url = _derive_stream_stop_url(start_url, job_id)
             except ValueError as e:
                 raise LivepeerGatewayError(str(e)) from e
-            data = _post_byoc_start(
-                start_url,
-                payload=req._body(job_id),
-                headers=headers,
-                timeout=float(max(1, int(req.timeout_seconds))),
-            )
+            start_payload = req._body(job_id)
+            start_timeout = float(max(1, int(req.timeout_seconds)))
+            try:
+                data = _post_byoc_start(
+                    start_url,
+                    payload=start_payload,
+                    headers=headers,
+                    timeout=start_timeout,
+                )
+            except PaymentRequiredError:
+                payment_header, segment_header = _get_start_payment_headers(
+                    session,
+                    payment_info=payment_info,
+                    capability_name=capability_name,
+                    allow_skip=False,
+                )
+                headers = {
+                    "Livepeer": signed_job_header,
+                    "Livepeer-Payment": payment_header,
+                    "Livepeer-Segment": segment_header,
+                }
+                _LOG.debug("BYOC start returned HTTP 402; retrying with a fresh payment ticket")
+                data = _post_byoc_start(
+                    start_url,
+                    payload=start_payload,
+                    headers=headers,
+                    timeout=start_timeout,
+                )
             job = BYOCJob.from_start_response(
                 data,
                 job_id=job_id,
-                capability=req.capability.strip(),
+                capability=capability_name,
                 payment_session=session,
                 signed_job_header=signed_job_header,
                 stream_stop_url=stop_url,

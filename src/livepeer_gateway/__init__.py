@@ -4,7 +4,12 @@ from .capabilities import CapabilityId, build_capabilities
 from .channel_reader import ChannelReader, JSONLReader
 from .channel_writer import ChannelWriter, JSONLWriter
 from .control import Control, ControlConfig, ControlMode
-from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, PaymentError
+from .errors import (
+    LivepeerGatewayError,
+    NoOrchestratorAvailableError,
+    PaymentError,
+    PaymentRequiredError,
+)
 from .events import Events
 from .media_publish import MediaPublish, MediaPublishConfig, MediaPublishStats
 from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
@@ -54,6 +59,7 @@ __all__ = [
     "OIDCConfig",
     "OrchestratorRejection",
     "PaymentError",
+    "PaymentRequiredError",
     "MediaPublish",
     "MediaPublishConfig",
     "MediaPublishStats",
