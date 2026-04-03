@@ -24,11 +24,15 @@ class BYOCPaymentSession(BasePaymentSession):
         signer_headers: Optional[dict[str, str]] = None,
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         max_refresh_retries: int = 3,
+        stream_payment_endpoint: str = "/ai/stream/payment",
     ) -> None:
         if not isinstance(capability_name, str) or not capability_name.strip():
             raise PaymentError("capability_name must be a non-empty string")
+        if not isinstance(stream_payment_endpoint, str) or not stream_payment_endpoint.strip():
+            raise PaymentError("stream_payment_endpoint must be a non-empty string")
 
         self._capability_name = capability_name.strip()
+        self._stream_payment_endpoint = stream_payment_endpoint.strip()
         super().__init__(
             signer_url,
             info,
@@ -42,7 +46,14 @@ class BYOCPaymentSession(BasePaymentSession):
     def _offchain_payment(self) -> GetPaymentResponse:
         return GetPaymentResponse(payment="", seg_creds="")
 
-    def sign_byoc_job(self, request: str, parameters: str) -> SignedBYOCJob:
+    def sign_byoc_job(
+        self,
+        job_id: str,
+        capability: str,
+        request: str,
+        parameters: str,
+        timeout_seconds: int,
+    ) -> SignedBYOCJob:
         if not self._signer_url:
             raise PaymentError("sign_byoc_job requires signer_url")
 
@@ -56,7 +67,14 @@ class BYOCPaymentSession(BasePaymentSession):
         url = _join_signer_endpoint(self._signer_url, "/sign-byoc-job")
         data = post_json(
             url,
-            {"request": request, "parameters": parameters},
+            {
+                "id": job_id,
+                "capability": capability,
+                "request": request,
+                "parameters": parameters,
+                "timeout_seconds": timeout_seconds,
+                "signature_format": "v1",
+            },
             headers=self._signer_headers,
         )
         sender = data.get("sender")
@@ -73,11 +91,10 @@ class BYOCPaymentSession(BasePaymentSession):
         if not self._info.transcoder:
             raise PaymentError("OrchestratorInfo missing transcoder URL for stream payment")
 
-        from .orchestrator import _http_origin
+        from .orchestrator import resolve_transcoder_http_url
 
         p = self.get_payment()
-        base = _http_origin(self._info.transcoder)
-        url = f"{base}/ai/stream/payment"
+        url = resolve_transcoder_http_url(self._info.transcoder, self._stream_payment_endpoint)
         headers = {
             "Livepeer": job_header,
             "Livepeer-Payment": p.payment,

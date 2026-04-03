@@ -67,5 +67,35 @@
             "console": "integratedTerminal",
             "justMyCode": true
         },
+        {
+            "name": "Python: BYOC text-only",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_text.py",
+            "args": [
+                "https://10.10.7.61:8935",
+                "--signer",
+                "http://10.10.7.61:9999",
+                "--capability",
+                "text-reversal",
+                "--text",
+                "hello from debug",
+                "--text",
+                "livepeer byoc",
+                "--text",
+                "cursor",
+                "--control-interval",
+                "1.0",
+                "--output-grace-seconds",
+                "2.0"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "ALLOW_HTTP_SIGNER": "1"
+            },
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true
+        },
     ]
 }
