@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Optional, Sequence
 from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urlparse, urlunparse
 
@@ -185,6 +186,61 @@ def _http_origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def resolve_transcoder_http_url(origin: str, path_or_absolute_url: str) -> str:
+    """
+    Build the final HTTP URL for a BYOC (or similar) call rooted at an orchestrator
+    transcoder origin, or pass through an absolute URL.
+
+    When ``path_or_absolute_url`` starts with ``http://`` or ``https://``, it is
+    returned unchanged (for gateways or workers on a different host). Otherwise it is
+    treated as a path on ``origin`` (leading ``/`` added if missing).
+    """
+    o = path_or_absolute_url.strip()
+    if not o:
+        raise ValueError("path_or_absolute_url must be non-empty")
+    low = o.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return o
+    if not o.startswith("/"):
+        o = "/" + o
+    base = _http_origin(origin)
+    return f"{base}{o}"
+
+
+def _allow_http_signer_env() -> bool:
+    v = os.environ.get("ALLOW_HTTP_SIGNER", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _is_loopback_signer_hostname(hostname: Optional[str]) -> bool:
+    if not hostname:
+        return False
+    h = hostname.lower()
+    if h in ("localhost", "127.0.0.1", "::1"):
+        return True
+    return h.endswith(".local")
+
+
+def _ensure_signer_url_https_or_allowed(signer_url: str) -> None:
+    """
+    Reject cleartext http:// remote signer URLs unless explicitly allowed.
+
+    Allowed when ALLOW_HTTP_SIGNER is set to a truthy value (1/true/yes/on),
+    or when the host is loopback / *.local (local development).
+    """
+    url = signer_url.strip()
+    normalized = url if "://" in url else f"https://{url}"
+    parsed = urlparse(normalized)
+    if parsed.scheme != "http":
+        return
+    if _allow_http_signer_env() or _is_loopback_signer_hostname(parsed.hostname):
+        return
+    raise LivepeerGatewayError(
+        "Remote signer URL uses http://, which is not allowed by default. "
+        "Use https://, or set environment variable ALLOW_HTTP_SIGNER=1 for development."
+    )
+
+
 def _join_signer_endpoint(signer_url: str, path: str) -> str:
         """
         Join an endpoint path onto signer_url while preserving any existing base path.
@@ -197,6 +253,8 @@ def _join_signer_endpoint(signer_url: str, path: str) -> str:
         """
         if not isinstance(signer_url, str) or not signer_url.strip():
                 raise ValueError("signer_url must be a non-empty string")
+
+        _ensure_signer_url_https_or_allowed(signer_url)
 
         suffix = path if path.startswith("/") else f"/{path}"
         base = signer_url.strip().rstrip("/")
