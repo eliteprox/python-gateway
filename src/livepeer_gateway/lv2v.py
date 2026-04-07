@@ -12,7 +12,7 @@ from typing import Any, Optional, Sequence
 from . import lp_rpc_pb2
 from .capabilities import CapabilityId, build_capabilities
 from .channel_writer import ChannelWriter
-from .control import Control
+from .control import Control, ControlConfig, ControlMode
 from .errors import (
     LivepeerGatewayError,
     NoOrchestratorAvailableError,
@@ -309,6 +309,7 @@ def start_lv2v(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    control_config: Optional[ControlConfig] = None,
     use_tofu: bool = True,
     timeout: float = 5.0,
 ) -> LiveVideoToVideo:
@@ -341,6 +342,9 @@ def start_lv2v(
     ``use_tofu`` controls TLS mode for ``GetOrchestrator``:
     - True: trust-on-first-use certificate pinning
     - False: default gRPC/system CA roots
+
+    ``control_config`` controls control-channel behavior. Use
+    ``ControlConfig(mode=ControlMode.DISABLED)`` to disable keepalives.
     """
     if not req.model_id:
         raise LivepeerGatewayError("start_lv2v requires model_id")
@@ -426,6 +430,9 @@ def start_lv2v(
                 raise LivepeerGatewayError("LiveVideoToVideo response missing manifest_id")
             session.set_manifest_id(job.manifest_id)
             job.start_payment_sender()
+            mode = control_config.mode if control_config is not None else ControlMode.MESSAGE
+            if mode == ControlMode.MESSAGE and job.control is not None:
+                job.control.start_keepalive()
             return job
         except LivepeerGatewayError as e:
             _LOG.debug(
