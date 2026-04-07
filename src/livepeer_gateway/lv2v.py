@@ -304,6 +304,7 @@ def start_lv2v(
     orch_url: Optional[Sequence[str] | str],
     req: StartJobRequest,
     *,
+    start_payments: bool = True,
     token: Optional[str] = None,
     signer_url: Optional[str] = None,
     signer_headers: Optional[dict[str, str]] = None,
@@ -319,10 +320,10 @@ def start_lv2v(
     Selects an orchestrator with LV2V capability and calls
     POST {info.transcoder}/live-video-to-video with JSON body.
 
-    If called from within a running asyncio event loop, a background
-    task is automatically started to send per-segment payments.
-    Otherwise a warning is logged and payments can be started later
-    via ``job.start_payment_sender()``.
+    If ``start_payments`` is true and the call happens within a running
+    asyncio event loop, a background task is automatically started to
+    send per-segment payments. Otherwise a warning is logged and
+    payments can be started later via ``job.start_payment_sender()``.
 
     Optional ``token`` can be provided as a base64-encoded JSON object.
     Token values take precedence over explicit keyword arguments.
@@ -429,7 +430,8 @@ def start_lv2v(
             if not job.manifest_id:
                 raise LivepeerGatewayError("LiveVideoToVideo response missing manifest_id")
             session.set_manifest_id(job.manifest_id)
-            job.start_payment_sender()
+            if start_payments:
+                job.start_payment_sender()
             mode = control_config.mode if control_config is not None else ControlMode.MESSAGE
             if mode == ControlMode.MESSAGE and job.control is not None:
                 job.control.start_keepalive()
