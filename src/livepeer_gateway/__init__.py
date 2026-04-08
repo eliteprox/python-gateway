@@ -20,6 +20,7 @@ from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
 from .orch_info import get_orch_info
 from .orchestrator import discover_orchestrators
 from .remote_signer import PaymentSession
+from .scope import start_scope
 from .selection import SelectionCursor, orchestrator_selector
 from .trickle_publisher import (
     TricklePublishError,
@@ -65,6 +66,7 @@ __all__ = [
     "orchestrator_selector",
     "StartJobRequest",
     "start_lv2v",
+    "start_scope",
     "TricklePublishError",
     "TricklePublisher",
     "TricklePublisherStats",
