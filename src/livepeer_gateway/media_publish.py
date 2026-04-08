@@ -198,6 +198,10 @@ class MediaPublishTrack:
     async def write_frame(self, frame: av.VideoFrame | av.AudioFrame) -> None:
         await self._owner._write_frame_to_track(self, frame)
 
+    def resize(self, queue_size: int) -> None:
+        """Resize this track's queue at runtime."""
+        self._owner.resize_track_queue(self, queue_size)
+
     def __repr__(self) -> str:
         return f"MediaPublishTrack(kind={self.kind!r}, index={self.index}, config={self.config!r})"
 
@@ -348,6 +352,20 @@ class MediaPublish:
         if normalized == "audio":
             return list(self._audio_tracks)
         raise ValueError(f"Unsupported track kind: {kind!r}")
+
+    def resize_track_queue(self, track: MediaPublishTrack, queue_size: int) -> None:
+        """Resize one track queue at runtime.
+
+        Resizing to a smaller size than the current queue depth is rejected.
+        """
+        if self._closed:
+            raise LivepeerGatewayError("MediaPublish is closed")
+        if self._error:
+            raise LivepeerGatewayError(f"MediaPublish failed: {self._error}") from self._error
+        state = self._track_state_by_track.get(track)
+        if state is None:
+            raise TypeError("MediaPublish track is not recognized")
+        state.queue.resize(queue_size)
 
     async def write_frame(self, frame: av.VideoFrame | av.AudioFrame) -> None:
         track = self._resolve_track_for_frame(frame)
@@ -951,6 +969,20 @@ class _FrameQueue:
         self._stop_after_current = False
         self._stop_enqueued = False
 
+    def resize(self, maxsize: int) -> None:
+        if not isinstance(maxsize, int) or isinstance(maxsize, bool):
+            raise TypeError(f"queue size must be int, got {type(maxsize).__name__}")
+        if maxsize <= 0:
+            raise ValueError("queue size must be > 0")
+        with self._queue.mutex:
+            depth = self._queue._qsize()
+            if maxsize < depth:
+                raise ValueError(
+                    f"queue size {maxsize} is smaller than current depth {depth}"
+                )
+            self._queue.maxsize = maxsize
+            self._queue.not_full.notify_all()
+
     def put(self, item: object) -> None:
         if self._stop_enqueued:
             return
@@ -1035,6 +1067,11 @@ class _FrameQueue:
     @property
     def qsize(self) -> int:
         return self._queue.qsize()
+
+    @property
+    def maxsize(self) -> int:
+        with self._queue.mutex:
+            return self._queue.maxsize
 
     def _accept_candidate(self, candidate: object) -> bool:
         candidate_media_time_s = self._frame_media_time_s(candidate)
