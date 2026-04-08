@@ -116,9 +116,13 @@ class TricklePublisher:
         # Lazily initialized async runtime bits (safe to construct in sync code).
         self._lock: Optional[asyncio.Lock] = None
         self._session: Optional[aiohttp.ClientSession] = None
+        self._closing = False
+        self._closed = False
 
         # Preconnected writer state for the next segment.
         self._next_state: Optional[_SegmentPostState] = None
+        self._preconnect_task_handle: Optional[asyncio.Task[None]] = None
+        self._post_tasks: set[asyncio.Task[None]] = set()
 
         # Terminal failure for the whole publisher. Once set, no new segments
         # should be opened or written.
@@ -147,6 +151,13 @@ class TricklePublisher:
         await self.close()
 
     async def _ensure_runtime(self) -> None:
+        # Prevent late background tasks from recreating a session after close.
+        if self._terminal_error is not None:
+            raise self._terminal_error
+        if self._closed:
+            raise RuntimeError("TricklePublisher is closed")
+        if self._closing:
+            raise RuntimeError("TricklePublisher is closing")
         if self._lock is None:
             self._lock = asyncio.Lock()
         if self._session is None:
@@ -161,18 +172,31 @@ class TricklePublisher:
         """
         Start the POST for `seq` in the background and return mutable segment state.
         """
+        if self._terminal_error is not None:
+            raise self._terminal_error
         await self._ensure_runtime()
-        assert self._session is not None
 
         url = self._stream_url(seq)
         _LOG.debug("Trickle preconnect: %s", url)
 
         state = _SegmentPostState(seq, send_reset=send_reset)
-        asyncio.create_task(self._run_post(url, state))
+        post_task = asyncio.create_task(self._run_post(url, state))
+        self._post_tasks.add(post_task)
+        post_task.add_done_callback(self._post_tasks.discard)
         return state
 
     async def _run_post(self, url: str, seg_state: _SegmentPostState) -> None:
-        await self._ensure_runtime()
+        # Bail out if shutdown started before or during runtime init.
+        if self._closing or self._closed:
+            return
+        try:
+            await self._ensure_runtime()
+        except Exception:
+            if self._closing or self._closed:
+                return
+            raise
+        if self._closing or self._closed:
+            return
         assert self._session is not None
 
         seq = seg_state.seq
@@ -283,12 +307,9 @@ class TricklePublisher:
             self._terminal_error = terminal_exc
             self._stats["terminal_failures"] += 1
 
-    async def _run_delete(self) -> None:
-        await self._ensure_runtime()
-        assert self._session is not None
-
+    async def _run_delete(self, session: aiohttp.ClientSession) -> None:
         try:
-            resp = await self._session.delete(self.url)
+            resp = await session.delete(self.url)
             resp.release()
         # Suppress any shutdown-time exceptions, including cancellation.
         except BaseException:
@@ -336,6 +357,15 @@ class TricklePublisher:
         return -1
 
     async def next(self) -> "SegmentWriter":
+        # Fail fast via the publisher error hierarchy, not a generic RuntimeError.
+        if self._closing or self._closed:
+            raise TricklePublisherTerminalError(
+                "Trickle publisher is closed",
+                consecutive_failures=self._consecutive_failures,
+                url=self.url,
+            )
+        if self._terminal_error is not None:
+            raise self._terminal_error
         await self._ensure_runtime()
         assert self._lock is not None
 
@@ -359,7 +389,16 @@ class TricklePublisher:
 
             # Preconnect the next segment in the background
             self.seq += 1
-            asyncio.create_task(self._preconnect_task(self.seq))
+            if self._preconnect_task_handle is not None and not self._preconnect_task_handle.done():
+                self._preconnect_task_handle.cancel()
+            preconnect_task = asyncio.create_task(self._preconnect_task(self.seq))
+            self._preconnect_task_handle = preconnect_task
+
+            def _clear_preconnect(task: asyncio.Task[None]) -> None:
+                if self._preconnect_task_handle is task:
+                    self._preconnect_task_handle = None
+
+            preconnect_task.add_done_callback(_clear_preconnect)
 
         return SegmentWriter(
             seg_state,
@@ -369,12 +408,21 @@ class TricklePublisher:
         )
 
     async def _preconnect_task(self, seq: int) -> None:
-        await self._ensure_runtime()
+        if self._closing or self._closed:
+            return
+        try:
+            await self._ensure_runtime()
+        except Exception:
+            if self._closing or self._closed:
+                return
+            raise
         assert self._lock is not None
 
         # Hold the lock across preconnect so only one task can reserve and
         # publish the next-state slot for this sequence at a time.
         async with self._lock:
+            if self._closing or self._closed:
+                return
             if self._terminal_error is not None:
                 return
             if self._next_state is not None:
@@ -385,39 +433,68 @@ class TricklePublisher:
             self._next_state = await self.preconnect(seq)
 
     async def close(self) -> None:
-        # If the publisher was never used, avoid creating a session just to close it.
-        if self._session is None and self._lock is None and self._next_state is None:
+        if self._closed:
             return
 
-        try:
-            await self._ensure_runtime()
-        # Close is best-effort; suppress cancellation/runtime-init failures.
-        except BaseException:
-            _LOG.warning("Trickle close suppressed runtime init failure url=%s", self.url, exc_info=True)
-            return
+        self._closing = True
 
-        assert self._lock is not None
+        # Cancel and await owned background tasks before taking the lock so
+        # preconnect tasks waiting on the lock receive CancelledError cleanly.
+        tasks_to_cancel: list[asyncio.Task[None]] = []
+        preconnect_task = self._preconnect_task_handle
+        self._preconnect_task_handle = None
+        if preconnect_task is not None and not preconnect_task.done():
+            preconnect_task.cancel()
+            tasks_to_cancel.append(preconnect_task)
+        for post_task in list(self._post_tasks):
+            if post_task.done():
+                continue
+            post_task.cancel()
+            tasks_to_cancel.append(post_task)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
         _LOG.debug("Trickle close: %s", self.url)
         try:
-            async with self._lock:
+            lock = self._lock
+            if lock is not None:
+                async with lock:
+                    if self._next_state is not None:
+                        await SegmentWriter(self._next_state).close()
+                        self._next_state = None
+
+                    session = self._session
+                    self._session = None
+                    if session is not None:
+                        try:
+                            await self._run_delete(session)
+                        # Best-effort shutdown: do not abort close on delete failures,
+                        # including cancellation.
+                        except BaseException:
+                            _LOG.warning("Trickle close suppressed delete failure url=%s", self.url, exc_info=True)
+                        try:
+                            await session.close()
+                        # Session close should not block the rest of teardown.
+                        except BaseException:
+                            _LOG.warning("Trickle close suppressed session close failure url=%s", self.url, exc_info=True)
+            else:
                 if self._next_state is not None:
                     await SegmentWriter(self._next_state).close()
                     self._next_state = None
-
-                if self._session is not None:
+                session = self._session
+                self._session = None
+                if session is not None:
                     try:
-                        await self._run_delete()
+                        await self._run_delete(session)
                     # Best-effort shutdown: do not abort close on delete failures,
                     # including cancellation.
                     except BaseException:
                         _LOG.warning("Trickle close suppressed delete failure url=%s", self.url, exc_info=True)
                     try:
-                        await self._session.close()
+                        await session.close()
                     # Session close should not block the rest of teardown.
                     except BaseException:
                         _LOG.warning("Trickle close suppressed session close failure url=%s", self.url, exc_info=True)
-                    self._session = None
         # Close should not raise; preserve best-effort semantics even on cancellation.
         except BaseException:
             _LOG.warning("Trickle close suppressed failure url=%s", self.url, exc_info=True)
@@ -428,6 +505,9 @@ class TricklePublisher:
                 except BaseException:
                     _LOG.warning("Trickle close suppressed fallback session close failure url=%s", self.url, exc_info=True)
                 self._session = None
+        finally:
+            self._next_state = None
+            self._closed = True
 
     def _record_write_bytes(self, byte_count: int) -> None:
         self._stats["bytes_submitted_to_transport"] += max(0, byte_count)

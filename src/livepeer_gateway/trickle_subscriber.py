@@ -75,6 +75,9 @@ class TrickleSubscriber:
         self._lock: Optional[asyncio.Lock] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._errored = False
+        self._closing = False
+        self._closed = False
+        self._prefetch_task: Optional[asyncio.Task[None]] = None
         self._started_at = time.time()
         self._stats: dict[str, int] = {
             "get_attempts": 0,
@@ -95,6 +98,9 @@ class TrickleSubscriber:
         await self.close()
 
     async def _ensure_runtime(self) -> None:
+        # Prevent late background tasks from recreating a session after close.
+        if self._closing or self._closed:
+            raise RuntimeError("TrickleSubscriber is closing")
         if self._lock is None:
             self._lock = asyncio.Lock()
         if self._session is None:
@@ -120,7 +126,14 @@ class TrickleSubscriber:
 
         For non-200 responses, retries up to max_retries unless a 404 is encountered.
         """
-        await self._ensure_runtime()
+        if self._closing or self._closed or self._errored:
+            return None
+        try:
+            await self._ensure_runtime()
+        except RuntimeError:
+            if self._closing or self._closed:
+                return None
+            raise
         assert self._session is not None
 
         seq = self._seq
@@ -128,6 +141,8 @@ class TrickleSubscriber:
         headers = {"Connection": "close"} if self._connection_close else None
 
         for attempt in range(0, self._max_retries):
+            if self._closing or self._closed or self._errored:
+                return None
             started = time.time()
             self._stats["get_attempts"] += 1
             _LOG.debug("Trickle sub preconnect attempt=%s url=%s", attempt, url)
@@ -177,7 +192,14 @@ class TrickleSubscriber:
 
     async def next(self) -> Optional["SegmentReader"]:
         """Retrieve data from the current segment and set up the next segment concurrently."""
-        await self._ensure_runtime()
+        if self._closing or self._closed:
+            return None
+        try:
+            await self._ensure_runtime()
+        except RuntimeError:
+            if self._closing or self._closed:
+                return None
+            raise
         assert self._lock is not None
 
         async with self._lock:
@@ -218,43 +240,83 @@ class TrickleSubscriber:
             self._stats["segments_delivered"] += 1
 
             # Set up the next connection in the background
-            asyncio.create_task(self._preconnect_next_segment())
+            if self._prefetch_task is None or self._prefetch_task.done():
+                prefetch_task = asyncio.create_task(self._preconnect_next_segment())
+                self._prefetch_task = prefetch_task
+
+                def _clear_prefetch(task: asyncio.Task[None]) -> None:
+                    if self._prefetch_task is task:
+                        self._prefetch_task = None
+
+                prefetch_task.add_done_callback(_clear_prefetch)
 
         return segment
 
     async def _preconnect_next_segment(self) -> None:
         """Preconnect to the next segment in the background."""
-        await self._ensure_runtime()
+        if self._closing or self._closed or self._errored:
+            return
+        try:
+            await self._ensure_runtime()
+        except RuntimeError:
+            if self._closing or self._closed:
+                return
+            raise
         assert self._lock is not None
 
         async with self._lock:
+            if self._closing or self._closed or self._errored:
+                return
             if self._pending_get is not None:
                 return
             next_conn = await self._preconnect()
+            # Discard late-arriving responses instead of leaking them.
+            if next_conn and (self._closing or self._closed or self._errored):
+                next_conn.close()
+                return
             if next_conn:
                 self._pending_get = next_conn
 
     async def close(self) -> None:
         """Close the session when done."""
-        if self._session is None and self._lock is None and self._pending_get is None:
+        if self._closed:
             return
 
-        await self._ensure_runtime()
-        assert self._lock is not None
+        self._closing = True
+        self._errored = True
+        # Cancel and await the background prefetch before taking the lock.
+        prefetch_task = self._prefetch_task
+        self._prefetch_task = None
+        if prefetch_task is not None and not prefetch_task.done():
+            prefetch_task.cancel()
+            await asyncio.gather(prefetch_task, return_exceptions=True)
 
         _LOG.debug("Trickle sub closing %s", self.base_url)
-        async with self._lock:
-            self._errored = True
+        lock = self._lock
+        if lock is not None:
+            async with lock:
+                if self._pending_get:
+                    self._pending_get.close()
+                    self._pending_get = None
+                session = self._session
+                self._session = None
+                if session:
+                    try:
+                        await session.close()
+                    except Exception:
+                        _LOG.error("Error closing trickle subscriber", exc_info=True)
+        else:
             if self._pending_get:
                 self._pending_get.close()
                 self._pending_get = None
-            if self._session:
+            session = self._session
+            self._session = None
+            if session:
                 try:
-                    await self._session.close()
+                    await session.close()
                 except Exception:
                     _LOG.error("Error closing trickle subscriber", exc_info=True)
-                finally:
-                    self._session = None
+        self._closed = True
 
     def get_stats(self) -> TrickleSubscriberStats:
         return TrickleSubscriberStats(
