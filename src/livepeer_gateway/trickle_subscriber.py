@@ -162,10 +162,24 @@ class TrickleSubscriber:
                     return None
 
                 if resp.status == 470:
-                    # Channel exists but no data at this index, so reset.
+                    # Channel exists but no data at this index. If the reported
+                    # leading edge is still behind the requested index, we are
+                    # polling ahead of the live edge and should retry the same
+                    # segment instead of rewinding and replaying the latest one.
                     self._stats["get_470_reset"] += 1
-                    seq = self._latest_seq(resp.headers, seq)
-                    self._stats["latest_seq"] = seq
+                    latest_seq = self._latest_seq(resp.headers, seq)
+                    self._stats["latest_seq"] = latest_seq
+                    if latest_seq < seq:
+                        _LOG.debug(
+                            "Trickle sub ahead of live edge, retrying current index %s "
+                            "(latest=%s)",
+                            url,
+                            latest_seq,
+                        )
+                        resp.release()
+                        await asyncio.sleep(0.25)
+                        continue
+                    seq = latest_seq
                     self._seq = seq
                     url = self._segment_url(seq)
                     _LOG.debug("Trickle sub resetting index to leading edge %s", url)
