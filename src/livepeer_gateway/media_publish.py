@@ -30,6 +30,7 @@ _DRAIN_TIMEOUT_S = 5.0
 _STOP = object()
 _DEFAULT_AUDIO_SAMPLE_RATE = 48_000
 _DEFAULT_AUDIO_LAYOUT = "mono"
+_MONOTONIC = time.monotonic
 
 
 def _fraction_from_time_base(time_base: object) -> Fraction:
@@ -119,6 +120,8 @@ class MediaPublishConfig:
     # Max seconds to wait for missing tracks after the first frame arrives.
     # Tracks with no first frame by the deadline are dropped.
     track_wait_timeout_s: float = 5.0
+    # Best-effort lower bound on wall-clock lifetime for each trickle segment.
+    min_segment_wallclock_s: float = 1.0
 
 @dataclass(frozen=True)
 class TrackQueueStats:
@@ -262,10 +265,14 @@ class MediaPublish:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._segment_tasks: Set[asyncio.Task[None]] = set()
+        self._segment_stream_lock = asyncio.Lock()
         self._start_lock = threading.Lock()
         self._track_wait_timeout_s = float(config.track_wait_timeout_s)
         if self._track_wait_timeout_s < 0:
             raise ValueError("MediaPublishConfig.track_wait_timeout_s must be >= 0")
+        self._min_segment_wallclock_s = float(config.min_segment_wallclock_s)
+        if self._min_segment_wallclock_s < 0:
+            raise ValueError("MediaPublishConfig.min_segment_wallclock_s must be >= 0")
         self._first_frame_arrived_at: Optional[float] = None
 
         self._closed = False
@@ -334,6 +341,8 @@ class MediaPublish:
 
         # Encoder state (owned by the encoder thread).
         self._container: Optional[av.container.OutputContainer] = None
+        self._active_segment: Any = None
+        self._active_segment_started_at: Optional[float] = None
 
     @property
     def tracks(self) -> tuple[MediaPublishTrack, ...]:
@@ -452,6 +461,10 @@ class MediaPublish:
                 "segment task gather",
                 asyncio.gather(*list(self._segment_tasks), return_exceptions=True),
             )
+        await self._suppress_close_step(
+            "active segment close",
+            self._close_active_segment(mark_completed=False),
+        )
 
         await self._suppress_close_step("publisher close", self._publisher.close())
 
@@ -839,13 +852,30 @@ class MediaPublish:
 
         self._loop.call_soon_threadsafe(_start)
 
+    async def _close_active_segment(self, *, mark_completed: bool) -> None:
+        async with self._segment_stream_lock:
+            await self._close_active_segment_locked(mark_completed=mark_completed)
+
+    async def _close_active_segment_locked(self, *, mark_completed: bool) -> None:
+        segment = self._active_segment
+        self._active_segment = None
+        self._active_segment_started_at = None
+        if segment is None:
+            return
+        await segment.close()
+        if mark_completed:
+            self._stats["segments_completed"] += 1
+
     async def _stream_pipe_to_trickle(self, read_file: BinaryIO) -> None:
         segment_seq: Optional[int] = None
         try:
-            segment = await self._publisher.next()
-            segment_seq = segment.seq()
-            self._stats["segments_started"] += 1
-            async with segment:
+            async with self._segment_stream_lock:
+                if self._active_segment is None:
+                    self._active_segment = await self._publisher.next()
+                    self._active_segment_started_at = _MONOTONIC()
+                    self._stats["segments_started"] += 1
+                segment = self._active_segment
+                segment_seq = segment.seq()
                 while True:
                     chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
                     if not chunk:
@@ -854,7 +884,15 @@ class MediaPublish:
                     # NB: the segment writer has its own chunk timeout, so
                     # lean on that instead of doing that here
                     await segment.write(chunk)
-            self._stats["segments_completed"] += 1
+                should_close_segment = self._closed or self._min_segment_wallclock_s <= 0
+                if (
+                    not should_close_segment
+                    and self._active_segment_started_at is not None
+                ):
+                    elapsed_s = max(0.0, _MONOTONIC() - self._active_segment_started_at)
+                    should_close_segment = elapsed_s >= self._min_segment_wallclock_s
+                if should_close_segment:
+                    await self._close_active_segment_locked(mark_completed=True)
         except TricklePublisherTerminalError as e:
             # At this point, publisher.next() has exhausted its retries and the
             # publisher cannot be used for future segments.
@@ -862,12 +900,15 @@ class MediaPublish:
                 self._error = e
             self._stats["segments_failed"] += 1
             self._stats["terminal_failures"] += 1
+            await self._close_active_segment(mark_completed=False)
             _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
         except TrickleSegmentWriteError:
             self._stats["segments_failed"] += 1
+            await self._close_active_segment(mark_completed=False)
             _LOG.warning("MediaPublish dropped segment seq=%s", segment_seq, exc_info=True)
         except Exception:
             self._stats["segments_failed"] += 1
+            await self._close_active_segment(mark_completed=False)
             _LOG.exception(
                 "MediaPublish unexpected failure while streaming segment seq=%s",
                 segment_seq,
