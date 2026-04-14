@@ -51,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
              "or combine with --signer for a fully explicit setup.",
     )
     p.add_argument(
+        "--discovery",
+        default=None,
+        help="Discovery endpoint for orchestrators (overrides signer /billing discovery).",
+    )
+    p.add_argument(
         "--model",
         default=DEFAULT_MODEL_ID,
         help=f"Pipeline model to start via /live-video-to-video. Default: {DEFAULT_MODEL_ID}",
@@ -94,6 +99,7 @@ async def main() -> None:
             StartJobRequest(model_id=args.model),
             signer_url=signer_url,
             signer_headers=signer_headers,
+            discovery_url=args.discovery,
             billing_url=billing_url,
             client_id=client_id,
             headless=not args.browser,
