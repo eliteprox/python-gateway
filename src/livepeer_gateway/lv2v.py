@@ -95,7 +95,7 @@ def _resolve_billing(
     discovery_url: Optional[str],
     *,
     client_id: str = "livepeer-sdk",
-    scopes: str = "openid profile gateway",
+    scopes: str = "openid profile sign:job",
     headless: bool = True,
     on_device_auth: Optional[Any] = None,
 ) -> tuple[Optional[str], Optional[dict[str, str]], Optional[str]]:
