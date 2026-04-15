@@ -55,7 +55,7 @@ def _ensure_https_for_display(url: str) -> str:
         return url
 
 DEFAULT_CLIENT_ID = "livepeer-sdk"
-DEFAULT_SCOPES = "openid profile gateway"
+DEFAULT_SCOPES = "openid profile sign:job"
 _CALLBACK_PATH = "/callback"
 _AUTH_TIMEOUT_S = 300  # 5 minutes to complete browser login
 
