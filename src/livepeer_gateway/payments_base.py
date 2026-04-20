@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -58,6 +59,8 @@ class BasePaymentSession:
         if self._capabilities is not None:
             caps_b64 = base64.b64encode(self._capabilities.SerializeToString()).decode("ascii")
             payload["capabilities"] = caps_b64
+        # One id per billing call so clearinghouse usage is not deduped across an entire manifest.
+        payload.setdefault("RequestID", str(uuid.uuid4()))
         return payload
 
     def _refresh_orchestrator_info(self) -> None:
