@@ -304,7 +304,6 @@ def start_lv2v(
     client_id: Optional[str] = None,
     headless: bool = True,
     on_device_auth: Optional[Any] = None,
-    use_tofu: bool = True,
 ) -> LiveVideoToVideo:
     """
     Start a live video-to-video job.
