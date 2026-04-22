@@ -253,22 +253,22 @@ class MediaOutput:
         seq = 0
         segment = await self._next_segment(seq)
         while segment is not None:
-            if not checked_content_type:
-                try:
-                    _require_content_type(
-                        segment.headers().get("Content-Type"),
-                        self.accepted_content_types,
-                    )
-                except Exception:
-                    self._stats["content_type_errors"] += 1
-                    raise
-                checked_content_type = True
             reader = segment.make_reader()
             self._stats["segments_consumed"] += 1
             while True:
                 chunk = await reader.read(chunk_size=self.chunk_size)
                 if not chunk:
                     break
+                if not checked_content_type:
+                    try:
+                        _require_content_type(
+                            segment.headers().get("Content-Type"),
+                            self.accepted_content_types,
+                        )
+                    except Exception:
+                        self._stats["content_type_errors"] += 1
+                        raise
+                    checked_content_type = True
                 self._stats["chunks_read"] += 1
                 self._stats["bytes_read"] += len(chunk)
                 yield chunk
