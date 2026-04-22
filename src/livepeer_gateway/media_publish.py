@@ -354,6 +354,12 @@ class MediaPublish:
         self._container: Optional[av.container.OutputContainer] = None
         self._active_segment: Any = None
         self._active_segment_started_at: Optional[float] = None
+        # If the active trickle segment fails and PyAV continues generating
+        # new segments within the active trickle interval (min_segment_wallclock_s)
+        # then use this flag to coalesce and drain writes. Prevents the
+        # rapid-fire creation of trickle segments in an uncertain network
+        # environment. Reset when the segment is closed.
+        self._active_segment_write_failed: bool = False
 
     @property
     def tracks(self) -> tuple[MediaPublishTrack, ...]:
@@ -871,13 +877,34 @@ class MediaPublish:
         segment = self._active_segment
         self._active_segment = None
         self._active_segment_started_at = None
+        self._active_segment_write_failed = False
         if segment is None:
             return
         await segment.close()
         if mark_completed:
             self._stats["segments_completed"] += 1
 
+    def _should_close_segment_after_loop(self) -> bool:
+        if self._closed or self._min_segment_wallclock_s <= 0:
+            return True
+        started_at = self._active_segment_started_at
+        if started_at is None:
+            return True
+        elapsed_s = max(0.0, _MONOTONIC() - started_at)
+        return elapsed_s >= self._min_segment_wallclock_s
+
     async def _stream_pipe_to_trickle(self, read_file: BinaryIO) -> None:
+        # This task owns the read end of one OS pipe. PyAV's segment muxer
+        # owns the write end. Closing the read end while the muxer still has
+        # the write end open causes the encoder thread to hit BrokenPipe on
+        # its next write and terminate the stream.
+        #
+        # When the segment POST fails mid-stream (e.g., the orchestrator
+        # idle-closed the TCP after a long pipeline stall) we set the
+        # _active_segment_write_failed flag and drain bytes for the
+        # remainder of the segment duration (min_segment_wallclock_s). This
+        # avoids creating many back-to-back segments that could fail while
+        # giving the orchestrator time to quiesce and recover.
         segment_seq: Optional[int] = None
         try:
             async with self._segment_stream_lock:
@@ -891,19 +918,37 @@ class MediaPublish:
                     chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
                     if not chunk:
                         break
+                    if self._active_segment_write_failed:
+                        # Drain phase: bytes are discarded. Encoder still
+                        # owns the write-fd; we must keep reading until it
+                        # closes. We also do not call segment.write() here;
+                        # the segment is already in an error state and every
+                        # such call would just re-raise.
+                        continue
                     self._stats["bytes_streamed_to_trickle"] += len(chunk)
                     # NB: the segment writer has its own chunk timeout, so
-                    # lean on that instead of doing that here
-                    await segment.write(chunk)
-                should_close_segment = self._closed or self._min_segment_wallclock_s <= 0
-                if (
-                    not should_close_segment
-                    and self._active_segment_started_at is not None
-                ):
-                    elapsed_s = max(0.0, _MONOTONIC() - self._active_segment_started_at)
-                    should_close_segment = elapsed_s >= self._min_segment_wallclock_s
-                if should_close_segment:
-                    await self._close_active_segment_locked(mark_completed=True)
+                    # lean on that instead of doing that here.
+                    try:
+                        await segment.write(chunk)
+                    except TrickleSegmentWriteError:
+                        self._active_segment_write_failed = True
+                        self._stats["segments_failed"] += 1
+                        _LOG.warning(
+                            "MediaPublish dropped segment seq=%s mid-stream; "
+                            "draining pipe until wall-clock segment ends",
+                            segment_seq,
+                            exc_info=True,
+                        )
+                # The loop exited (EOF from PyAV rotation, or close()).
+                # Decide whether to finalize the current wall-clock segment
+                # now or keep it open so the next PyAV segment piggy-backs
+                # on the same segment if not enough time has elapsed
+                # (min_segment_wallclock_s). This policy is the same whether
+                # or not the current segment is in an error state.
+                if self._should_close_segment_after_loop():
+                    await self._close_active_segment_locked(
+                        mark_completed=not self._active_segment_write_failed
+                    )
         except TricklePublisherTerminalError as e:
             # At this point, publisher.next() has exhausted its retries and the
             # publisher cannot be used for future segments.
@@ -913,10 +958,6 @@ class MediaPublish:
             self._stats["terminal_failures"] += 1
             await self._close_active_segment(mark_completed=False)
             _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
-        except TrickleSegmentWriteError:
-            self._stats["segments_failed"] += 1
-            await self._close_active_segment(mark_completed=False)
-            _LOG.warning("MediaPublish dropped segment seq=%s", segment_seq, exc_info=True)
         except Exception:
             self._stats["segments_failed"] += 1
             await self._close_active_segment(mark_completed=False)
