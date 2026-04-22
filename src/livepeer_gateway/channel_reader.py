@@ -55,8 +55,8 @@ class ChannelReader:
                 ) as subscriber:
                     while (segment := await subscriber.next()) is not None:
                         payload = await _read_all(segment)
-                        if not payload:
-                            raise LivepeerGatewayError("Trickle event segment was empty")
+                        if not payload.strip():
+                            continue
 
                         try:
                             data = json.loads(payload.decode("utf-8"))
