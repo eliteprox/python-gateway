@@ -336,9 +336,15 @@ def byoc_request(
                 )
                 livepeer_segment = _seg_creds_for_zero_ticket(info)
 
+            # BYOC job traffic hits the orchestrator's HTTP endpoint, which
+            # may be on a different host:port than the gRPC target (the orch
+            # advertises it via OrchestratorInfo.transcoder). Fall back to
+            # selected_url only when the field is empty.
+            http_url = info.transcoder or selected_url
+
             try:
                 resp = _open_byoc_request(
-                    selected_url,
+                    http_url,
                     capability_name,
                     body_bytes,
                     content_type=encoded_ct,
@@ -351,11 +357,11 @@ def byoc_request(
                 body_text = _extract_error_message(e)
                 body_part = f"; body={body_text!r}" if body_text else ""
                 raise LivepeerGatewayError(
-                    f"BYOC orch error: HTTP {e.code} (url={selected_url}){body_part}"
+                    f"BYOC orch error: HTTP {e.code} (url={http_url}){body_part}"
                 ) from e
             except (URLError, ConnectionRefusedError) as e:
                 raise LivepeerGatewayError(
-                    f"BYOC orch error: failed to reach orchestrator: {e} (url={selected_url})"
+                    f"BYOC orch error: failed to reach orchestrator: {e} (url={http_url})"
                 ) from e
 
             status = resp.status
@@ -364,7 +370,7 @@ def byoc_request(
                 return ByocStreamResponse(
                     status_code=status,
                     headers=headers,
-                    orch_url=selected_url,
+                    orch_url=http_url,
                     _response=resp,
                 )
             with closing(resp):
@@ -373,7 +379,7 @@ def byoc_request(
                 status_code=status,
                 headers=headers,
                 body=raw,
-                orch_url=selected_url,
+                orch_url=http_url,
             )
         except LivepeerGatewayError as e:
             _LOG.debug(
