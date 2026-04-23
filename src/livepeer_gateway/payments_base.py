@@ -45,6 +45,9 @@ class BasePaymentSession:
     def _offchain_payment(self) -> GetPaymentResponse:
         raise NotImplementedError
 
+    def _extra_payment_payload(self) -> dict[str, Any]:
+        return {}
+
     def _build_payment_payload(self) -> dict[str, Any]:
         pb = self._info.SerializeToString()
         orch_b64 = base64.b64encode(pb).decode("ascii")
@@ -59,6 +62,7 @@ class BasePaymentSession:
         if self._capabilities is not None:
             caps_b64 = base64.b64encode(self._capabilities.SerializeToString()).decode("ascii")
             payload["capabilities"] = caps_b64
+        payload.update(self._extra_payment_payload())
         # One id per billing call so clearinghouse usage is not deduped across an entire manifest.
         payload.setdefault("RequestID", str(uuid.uuid4()))
         return payload

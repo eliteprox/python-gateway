@@ -46,6 +46,9 @@ class BYOCPaymentSession(BasePaymentSession):
     def _offchain_payment(self) -> GetPaymentResponse:
         return GetPaymentResponse(payment="", seg_creds="")
 
+    def _extra_payment_payload(self) -> dict[str, str]:
+        return {"capability": self._capability_name}
+
     def sign_byoc_job(
         self,
         job_id: str,
@@ -73,7 +76,6 @@ class BYOCPaymentSession(BasePaymentSession):
                 "request": request,
                 "parameters": parameters,
                 "timeout_seconds": timeout_seconds,
-                "signature_format": "v1",
             },
             headers=self._signer_headers,
         )

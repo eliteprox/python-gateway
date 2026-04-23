@@ -394,9 +394,9 @@ def _get_start_payment_headers(
         if "priceInfo" in msg.lower() or "price" in msg.lower():
             raise LivepeerGatewayError(
                 f"BYOC signer pricing error: the remote signer rejected payment generation "
-                f"(likely missing or zero priceInfo in OrchestratorInfo for capability "
-                f"'{capability_name}'). Ensure the orchestrator advertises "
-                f"capability-specific pricing for BYOC/{capability_name}. "
+                f"(likely missing or invalid /process/token price response for capability "
+                f"'{capability_name}'). Ensure the orchestrator /process/token endpoint "
+                f"returns valid BYOC price and ticket params for BYOC/{capability_name}. "
                 f"Signer detail: {msg}"
             ) from pay_err
         raise
