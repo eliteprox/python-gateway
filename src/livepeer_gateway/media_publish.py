@@ -272,6 +272,7 @@ class MediaPublish:
         config: MediaPublishConfig = MediaPublishConfig(),
     ) -> None:
         self.publish_url = publish_url
+        self._channel_name = publish_url.rstrip("/").rsplit("/", 1)[-1]
         if not config.tracks:
             raise ValueError("MediaPublishConfig.tracks must include at least one track")
 
@@ -497,7 +498,8 @@ class MediaPublish:
 
         if self._error:
             _LOG.warning(
-                "MediaPublish close suppressed prior publish failure: %s",
+                "MediaPublish[%s] close suppressed prior publish failure: %s",
+                self._channel_name,
                 self._error,
                 exc_info=(type(self._error), self._error, self._error.__traceback__),
             )
@@ -545,7 +547,11 @@ class MediaPublish:
         except Exception as e:
             self._error = e
             self._stats["encoder_errors"] += 1
-            _LOG.error("MediaPublish encoder error", exc_info=True)
+            _LOG.error(
+                "MediaPublish[%s] encoder error",
+                self._channel_name,
+                exc_info=True,
+            )
         finally:
             if self._container is not None:
                 try:
@@ -945,8 +951,9 @@ class MediaPublish:
                         # accommodate long stalls / inactivity from the
                         # PyAV end, eg during model loading
                         _LOG.warning(
-                            "MediaPublish trickle segment seq=%s idle for "
+                            "MediaPublish[%s] trickle segment seq=%s idle for "
                             "%.1fs; rolling over to a fresh empty segment",
+                            self._channel_name,
                             segment_seq,
                             idle_timeout_s,
                         )
@@ -983,8 +990,9 @@ class MediaPublish:
                         self._active_segment_drain = True
                         self._stats["segments_failed"] += 1
                         _LOG.warning(
-                            "MediaPublish dropped segment seq=%s mid-stream; "
+                            "MediaPublish[%s] dropped segment seq=%s mid-stream; "
                             "draining pipe until wall-clock segment ends",
+                            self._channel_name,
                             segment_seq,
                             exc_info=True,
                         )
@@ -1000,7 +1008,11 @@ class MediaPublish:
             self._stats["segments_failed"] += 1
             self._stats["terminal_failures"] += 1
             await self._close_active_segment(mark_completed=False)
-            _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
+            _LOG.error(
+                "MediaPublish[%s] terminal failure while streaming",
+                self._channel_name,
+                exc_info=True,
+            )
         except Exception:
             self._stats["segments_failed"] += 1
             await self._close_active_segment(mark_completed=False)
