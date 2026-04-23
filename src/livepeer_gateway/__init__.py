@@ -19,6 +19,7 @@ from .errors import OrchestratorRejection
 from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
 from .orch_info import get_orch_info
 from .orchestrator import discover_orchestrators
+from .byoc import ByocResponse, ByocStreamResponse, byoc_request
 from .remote_signer import (
     PaymentSession,
     PAYMENT_TYPE_BYOC_REQUEST,
@@ -50,6 +51,9 @@ __all__ = [
     "LivepeerGatewayError",
     "NoOrchestratorAvailableError",
     "OrchestratorRejection",
+    "byoc_request",
+    "ByocResponse",
+    "ByocStreamResponse",
     "PAYMENT_TYPE_BYOC_REQUEST",
     "PAYMENT_TYPE_LV2V",
     "PaymentError",
