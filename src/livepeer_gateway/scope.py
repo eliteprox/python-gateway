@@ -8,7 +8,7 @@ from .control import ControlConfig, ControlMode
 from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, OrchestratorRejection
 from .lv2v import LiveVideoToVideo, StartJobRequest
 from .orchestrator import _http_origin, post_json
-from .remote_signer import PaymentSession
+from .remote_signer import PAYMENT_TYPE_LV2V, PaymentSession
 from .selection import orchestrator_selector
 from .token import parse_token
 
@@ -121,7 +121,7 @@ def start_scope(
                 resolved_signer_url,
                 info,
                 signer_headers=resolved_signer_headers,
-                type="lv2v",
+                type=PAYMENT_TYPE_LV2V,
                 capabilities=capabilities,
                 use_tofu=use_tofu,
             )

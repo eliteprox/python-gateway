@@ -15,6 +15,12 @@ from . import lp_rpc_pb2
 from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired, SkipPaymentCycle
 _LOG = logging.getLogger(__name__)
 
+
+# Payment types accepted by the remote signer's /generate-live-payment endpoint.
+# Mirrors the RemoteType_* constants in go-livepeer/server/remote_signer.go.
+PAYMENT_TYPE_LV2V = "lv2v"
+PAYMENT_TYPE_BYOC_REQUEST = "byoc-request"
+
 @dataclass(frozen=True)
 class GetPaymentResponse:
     payment: str
@@ -163,7 +169,15 @@ class PaymentSession:
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         use_tofu: bool = True,
         max_refresh_retries: int = 3,
+        in_pixels: Optional[int] = None,
     ) -> None:
+        """
+        ``in_pixels`` supplies an explicit compute budget for types that don't
+        use signer-side auto-calculation. Required for
+        ``PAYMENT_TYPE_BYOC_REQUEST``; for BYOC pricing (``PixelsPerUnit``
+        denominates wei-per-second) this represents "seconds of compute to
+        pre-fund." Ignored by ``PAYMENT_TYPE_LV2V`` which auto-calculates.
+        """
         self._signer_url = signer_url
         self._signer_headers = signer_headers
         self._info = info
@@ -173,6 +187,9 @@ class PaymentSession:
         self._use_tofu = use_tofu
         self._max_refresh_retries = max(0, int(max_refresh_retries))
         self._state: Optional[dict[str, str]] = None
+        if in_pixels is not None and int(in_pixels) <= 0:
+            raise PaymentError("in_pixels must be a positive integer")
+        self._in_pixels: Optional[int] = int(in_pixels) if in_pixels is not None else None
 
     def set_manifest_id(self, manifest_id: str) -> None:
         if not isinstance(manifest_id, str) or not manifest_id.strip():
@@ -212,6 +229,8 @@ class PaymentSession:
                 "orchestrator": orch_b64,
                 "type": self._type,
             }
+            if self._in_pixels is not None:
+                payload["inPixels"] = self._in_pixels
             if self._manifest_id is not None:
                 payload["ManifestID"] = self._manifest_id
             if self._state is not None:

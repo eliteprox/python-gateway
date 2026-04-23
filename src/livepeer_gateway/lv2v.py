@@ -21,7 +21,7 @@ from .media_output import LagPolicy, MediaOutput
 from .media_publish import MediaPublish, MediaPublishConfig
 from .orchestrator import _http_origin, post_json
 from .selection import orchestrator_selector
-from .remote_signer import PaymentSession
+from .remote_signer import PAYMENT_TYPE_LV2V, PaymentSession
 from .token import parse_token
 from .trickle_subscriber import TrickleSubscriber
 
@@ -352,7 +352,7 @@ def start_lv2v(
                 resolved_signer_url,
                 info,
                 signer_headers=resolved_signer_headers,
-                type="lv2v",
+                type=PAYMENT_TYPE_LV2V,
                 capabilities=capabilities,
                 use_tofu=use_tofu,
             )
