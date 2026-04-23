@@ -169,6 +169,7 @@ class MediaPublishStats:
     segments_completed: int
     segments_failed: int
     bytes_streamed_to_trickle: int
+    bytes_drained: int
     segment_writer_put_timeouts: int
     terminal_failures: int
     encoder_errors: int
@@ -184,6 +185,7 @@ class MediaPublishStats:
             f"segments_completed={self.segments_completed}, "
             f"segments_failed={self.segments_failed}, "
             f"bytes_streamed_to_trickle={self.bytes_streamed_to_trickle}, "
+            f"bytes_drained={self.bytes_drained}, "
             f"segment_writer_put_timeouts={self.segment_writer_put_timeouts}, "
             f"terminal_failures={self.terminal_failures}, "
             f"encoder_errors={self.encoder_errors}, "
@@ -305,6 +307,7 @@ class MediaPublish:
             "segments_failed": 0,
             "terminal_failures": 0,
             "bytes_streamed_to_trickle": 0,
+            "bytes_drained": 0,
             "segment_writer_put_timeouts": 0,
             "encoder_errors": 0,
         }
@@ -968,6 +971,7 @@ class MediaPublish:
                     if self._active_segment_drain:
                         # Drain until EOF after a write failure or a
                         # mid-segment idle cutover.
+                        self._stats["bytes_drained"] += len(chunk)
                         continue
                     pipe_past_keyframe = True
                     self._stats["bytes_streamed_to_trickle"] += len(chunk)
@@ -1056,6 +1060,7 @@ class MediaPublish:
             segments_completed=self._stats["segments_completed"],
             segments_failed=self._stats["segments_failed"],
             bytes_streamed_to_trickle=self._stats["bytes_streamed_to_trickle"],
+            bytes_drained=self._stats["bytes_drained"],
             segment_writer_put_timeouts=max(
                 self._stats["segment_writer_put_timeouts"],
                 publisher_stats.segment_writer_put_timeouts,

@@ -18,6 +18,7 @@ class TricklePublisherStats:
     elapsed_s: float
     segments_started: int
     segments_completed: int
+    empty_segments_completed: int
     segments_failed: int
     post_attempts: int
     post_retries_no_body_consumed: int
@@ -38,6 +39,7 @@ class TricklePublisherStats:
             f"elapsed_s={self.elapsed_s:.1f}, "
             f"segments_started={self.segments_started}, "
             f"segments_completed={self.segments_completed}, "
+            f"empty_segments_completed={self.empty_segments_completed}, "
             f"segments_failed={self.segments_failed}, "
             f"post_attempts={self.post_attempts}, "
             f"post_http_failures={self.post_http_failures}, "
@@ -142,6 +144,7 @@ class TricklePublisher:
             "segment_writer_put_timeouts": 0,
             "bytes_submitted_to_transport": 0,
             "terminal_failures": 0,
+            "empty_segments_completed": 0,
         }
 
     async def __aenter__(self) -> "TricklePublisher":
@@ -233,6 +236,8 @@ class TricklePublisher:
                     self._consecutive_failures = 0
                     self._stats["post_success"] += 1
                     self._stats["segments_completed"] += 1
+                    if not seg_state.data_consumed:
+                        self._stats["empty_segments_completed"] += 1
                     return
                 self._stats["post_http_failures"] += 1
                 final_exc = TrickleSegmentWriteError(
@@ -520,6 +525,7 @@ class TricklePublisher:
             elapsed_s=max(0.0, time.time() - self._started_at),
             segments_started=self._stats["segments_started"],
             segments_completed=self._stats["segments_completed"],
+            empty_segments_completed=self._stats["empty_segments_completed"],
             segments_failed=self._stats["segments_failed"],
             post_attempts=self._stats["post_attempts"],
             post_retries_no_body_consumed=self._stats["post_retries_no_body_consumed"],
@@ -609,5 +615,4 @@ class SegmentWriter:
 
     def seq(self) -> int:
         return self._seq
-
 
