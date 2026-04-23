@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import secrets
 import ssl
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -18,14 +19,16 @@ from .errors import (
     PaymentError,
     SkipPaymentCycle,
 )
+from .job_token import job_token_selector, job_token_to_orch_info
 from .orchestrator import _extract_error_message, _http_origin
 from .remote_signer import (
     PAYMENT_TYPE_BYOC_REQUEST,
+    ByocJobSigningInput,
     PaymentSession,
     _freeze_headers,
     get_orch_info_sig,
+    sign_byoc_job,
 )
-from .selection import orchestrator_selector
 from .token import parse_token
 
 _LOG = logging.getLogger(__name__)
@@ -91,40 +94,68 @@ class ByocStreamResponse:
         self.close()
 
 
+def _build_request_str(body: Any) -> str:
+    """
+    Canonical request string used in both the signed payload and the
+    Livepeer header. The signer signs ``request + parameters``; those
+    exact bytes must be identical to what lands in ``JobRequest.Request``
+    on the header, otherwise the orchestrator's VerifySig recovers a
+    different address.
+    """
+    if isinstance(body, (bytes, bytearray)):
+        return bytes(body).decode("utf-8")
+    if isinstance(body, str):
+        return body
+    return json.dumps(body)
+
+
+def _build_parameters_str(options_filter: Optional[dict[str, str]]) -> str:
+    """
+    Canonical parameters string — empty when no ``options_filter`` is
+    supplied, otherwise a compact JSON-encoded ``{"options_filter": ...}``
+    object. Must byte-match what goes on the Livepeer header and what
+    gets signed.
+    """
+    if not options_filter:
+        return ""
+    return json.dumps(
+        {"options_filter": {str(k): str(v) for k, v in options_filter.items()}},
+        separators=(",", ":"),
+    )
+
+
 def _build_livepeer_header(
-    capability: str,
-    body: Any,
     *,
+    id: str,
+    capability: str,
+    request_str: str,
+    parameters_str: str,
     timeout_seconds: int,
-    options_filter: Optional[dict[str, str]] = None,
+    sender: Optional[str] = None,
+    sig: Optional[str] = None,
 ) -> str:
     """
     Build the base64-JSON value for the ``Livepeer`` HTTP header used by
     ``POST /process/request/{capability}``.
 
-    Mirrors ``byoc.JobRequest`` in go-livepeer, including the quirk that
-    ``parameters`` is a nested JSON-encoded string rather than an embedded
-    object.
+    Mirrors ``byoc.JobRequest`` in go-livepeer:
+    - ``request`` and ``parameters`` are nested JSON strings (not embedded
+      objects).
+    - ``sender`` / ``sig`` are present on signed requests (the orch runs
+      ``VerifySig(sender, request+parameters, sig)``).
     """
-    if isinstance(body, (bytes, bytearray)):
-        request_str = bytes(body).decode("utf-8")
-    elif isinstance(body, str):
-        request_str = body
-    else:
-        request_str = json.dumps(body)
-
-    parameters: dict[str, Any] = {}
-    if options_filter:
-        parameters["options_filter"] = {
-            str(k): str(v) for k, v in options_filter.items()
-        }
-
-    job_req = {
+    job_req: dict[str, Any] = {
+        "id": id,
         "request": request_str,
-        "parameters": json.dumps(parameters, separators=(",", ":")) if parameters else "",
+        "parameters": parameters_str,
         "capability": capability,
         "timeout_seconds": int(timeout_seconds),
     }
+    if sender:
+        # Preserve EIP-55 casing — do not normalise through any hex round-trip.
+        job_req["sender"] = sender
+    if sig:
+        job_req["sig"] = sig
     encoded = json.dumps(job_req, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(encoded).decode("ascii")
 
@@ -277,30 +308,59 @@ def byoc_request(
         resolved_discovery_headers = discovery_headers
 
     body_bytes, encoded_ct = _encode_body(body, content_type)
+
+    # Compose request + parameters once, before signing. The exact byte
+    # sequence that goes to the signer must also be what lands in the
+    # Livepeer header's JobRequest fields — the orch re-concatenates
+    # Request + Parameters and recovers the sender from the signature.
+    # Any drift (whitespace, key order, case) breaks VerifySig.
+    request_str = _build_request_str(body)
+    parameters_str = _build_parameters_str(options_filter)
+    if not resolved_signer_url:
+        raise LivepeerGatewayError(
+            "byoc_request requires a signer_url (BYOC jobs must be signed by the remote signer)"
+        )
+    job_sig = sign_byoc_job(
+        resolved_signer_url,
+        ByocJobSigningInput(request=request_str, parameters=parameters_str),
+        signer_headers=resolved_signer_headers,
+    )
+    job_id = secrets.token_hex(16)
     livepeer_header = _build_livepeer_header(
-        capability_name,
-        body,
+        id=job_id,
+        capability=capability_name,
+        request_str=request_str,
+        parameters_str=parameters_str,
         timeout_seconds=timeout_seconds,
-        options_filter=options_filter,
+        sender=job_sig.sender,
+        sig=job_sig.signature,
     )
 
-    # Capability-level discovery filtering: the orchestrator's options_filter
-    # evaluation is runner-side (runner selection); for the gRPC
-    # GetOrchestrator round we only filter by capability name.
-    cursor = orchestrator_selector(
+    # BYOC uses HTTP /process/token for per-(sender, capability) discovery,
+    # which go-livepeer requires for non-zero PriceInfo + TicketParams
+    # (byoc/job_gateway.go:339-403; byoc/types.go:135-145). gRPC
+    # GetOrchestrator is not a substitute: it returns the orchestrator's
+    # generic transcoding price, which is typically zero on a BYOC-only orch
+    # and trips the signer's "missing or zero priceInfo" guard
+    # (server/remote_signer.go:253-258).
+    #
+    # use_tofu is ignored here (the /process/token path uses plain HTTPS);
+    # it's still forwarded to PaymentSession for the signer-480 refresh path.
+    cursor = job_token_selector(
         resolved_orch_url,
         signer_url=resolved_signer_url,
         signer_headers=resolved_signer_headers,
         discovery_url=resolved_discovery_url,
         discovery_headers=resolved_discovery_headers,
-        capabilities=None,
-        use_tofu=use_tofu,
+        capability=capability_name,
+        options_filter=options_filter,
+        timeout=request_timeout,
     )
 
     rejections: list[OrchestratorRejection] = []
     while True:
         try:
-            selected_url, info = cursor.next()
+            selected_url, job_token = cursor.next()
         except NoOrchestratorAvailableError as e:
             all_rejections = list(e.rejections) + rejections
             if all_rejections:
@@ -311,6 +371,7 @@ def byoc_request(
             raise
 
         try:
+            info = job_token_to_orch_info(job_token)
             session = PaymentSession(
                 resolved_signer_url,
                 info,

@@ -33,9 +33,16 @@ class SignerMaterial:
     Material returned by the remote signer.
     address: 20-byte broadcaster ETH address
     sig: signature bytes (length depends on scheme; commonly 65 bytes for ECDSA)
+    address_hex / sig_hex: raw strings as returned by the signer, preserving
+        any 0x prefix and original casing. The BYOC orchestrator's
+        verifyTokenCreds (byoc/job_orchestrator.go:701) signs the addr *string*,
+        so any case-normalization (e.g. bytes.hex() → lowercase) flips an
+        EIP-55 mixed-case address to lowercase and breaks signature recovery.
     """
-    address: bytes
-    sig: bytes
+    address: Optional[bytes]
+    sig: Optional[bytes]
+    address_hex: Optional[str] = None
+    sig_hex: Optional[str] = None
 
 
 @dataclass
@@ -111,8 +118,10 @@ def get_orch_info_sig(
                 cause=None,
             ) from None
 
-        address = _hex_to_bytes(str(data["address"]), expected_len=20)
-        sig = _hex_to_bytes(str(data["signature"]))  # signature length may vary
+        address_hex = str(data["address"])
+        sig_hex = str(data["signature"])
+        address = _hex_to_bytes(address_hex, expected_len=20)
+        sig = _hex_to_bytes(sig_hex)  # signature length may vary
 
     except LivepeerGatewayError as e:
         # post_json wraps the underlying exception as __cause__; convert back into
@@ -155,7 +164,110 @@ def get_orch_info_sig(
             cause=cause if isinstance(cause, BaseException) else e,
         ) from None
 
-    return SignerMaterial(address=address, sig=sig)
+    return SignerMaterial(
+        address=address,
+        sig=sig,
+        address_hex=address_hex,
+        sig_hex=sig_hex,
+    )
+
+
+@dataclass(frozen=True)
+class ByocJobSigningInput:
+    """
+    Payload we send to the remote signer's ``POST /sign-byoc-job``. The
+    signer concatenates ``request + parameters`` and signs the result
+    with the gateway's eth key, mirroring the embedded-key path at
+    ``byoc/utils.go::(*gatewayJob).sign()`` in go-livepeer.
+    """
+    request: str
+    parameters: str
+
+
+@dataclass(frozen=True)
+class ByocJobSignature:
+    """
+    Signer's response. ``sender`` is an EIP-55 mixed-case eth address.
+    ``signature`` is a ``0x``-prefixed 65-byte ECDSA signature.
+
+    Both fields MUST be placed into ``JobRequest.Sender`` /
+    ``JobRequest.Sig`` verbatim. Any case-normalising round-trip
+    (``bytes.fromhex(addr).hex()`` or similar) flips EIP-55 casing to
+    lowercase, and the orchestrator's ``VerifySig`` then recovers a
+    different address from the signature.
+    """
+    sender: str
+    signature: str
+
+
+def sign_byoc_job(
+    signer_url: str,
+    signing_input: ByocJobSigningInput,
+    *,
+    signer_headers: Optional[dict[str, str]] = None,
+    timeout: float = 5.0,
+) -> ByocJobSignature:
+    """
+    Request a one-off job signature from the remote signer.
+
+    Called once per BYOC job (not cached across requests) because the
+    ``request`` and ``parameters`` payload differs per call. The
+    gateway-side embedded-key equivalent is
+    ``byoc/utils.go::(*gatewayJob).sign()``.
+    """
+    if not signer_url:
+        raise PaymentError(
+            "sign_byoc_job requires a signer_url (no offchain mode fallback)"
+        )
+
+    from .orchestrator import _extract_error_message, _http_origin, post_json
+
+    url = f"{_http_origin(signer_url)}/sign-byoc-job"
+    payload: dict[str, Any] = {
+        "request": signing_input.request,
+        "parameters": signing_input.parameters,
+    }
+
+    try:
+        data = post_json(url, payload, headers=signer_headers, timeout=timeout)
+    except LivepeerGatewayError as e:
+        cause = e.__cause__ or e
+        if isinstance(cause, HTTPError):
+            body = _extract_error_message(cause)
+            body_part = f"; body={body!r}" if body else ""
+            raise RemoteSignerError(
+                url,
+                f"HTTP {cause.code} from signer{body_part}",
+                cause=cause,
+            ) from None
+        if isinstance(cause, (ConnectionRefusedError, URLError)):
+            raise RemoteSignerError(
+                url,
+                f"failed to reach signer: {getattr(cause, 'reason', cause)}",
+                cause=cause,
+            ) from None
+        raise RemoteSignerError(
+            url,
+            f"unexpected error: {cause.__class__.__name__}: {cause}",
+            cause=cause if isinstance(cause, BaseException) else e,
+        ) from None
+
+    sender = data.get("sender")
+    signature = data.get("signature")
+    if not isinstance(sender, str) or not sender:
+        raise RemoteSignerError(
+            url,
+            f"sign-byoc-job response missing/invalid 'sender': {data!r}",
+            cause=None,
+        )
+    if not isinstance(signature, str) or not signature:
+        raise RemoteSignerError(
+            url,
+            f"sign-byoc-job response missing/invalid 'signature': {data!r}",
+            cause=None,
+        )
+    # Intentionally passing through verbatim — no case normalisation.
+    return ByocJobSignature(sender=sender, signature=signature)
 
 
 class PaymentSession:
