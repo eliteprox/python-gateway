@@ -36,11 +36,17 @@ class BasePaymentSession:
         self._capabilities = capabilities
         self._max_refresh_retries = max(0, int(max_refresh_retries))
         self._state: Optional[dict[str, Any]] = None
+        self._timeout_seconds: int = 0
 
     def set_manifest_id(self, manifest_id: str) -> None:
         if not isinstance(manifest_id, str) or not manifest_id.strip():
             raise PaymentError("manifest_id must be a non-empty string")
         self._manifest_id = manifest_id.strip()
+
+    def set_timeout_seconds(self, timeout_seconds: int) -> None:
+        # Hint the remote signer about expected job duration so BYOC initial
+        # ticket batches are sized to match the work (floored server-side).
+        self._timeout_seconds = max(0, int(timeout_seconds))
 
     def _offchain_payment(self) -> GetPaymentResponse:
         raise NotImplementedError
@@ -54,6 +60,8 @@ class BasePaymentSession:
         }
         if self._manifest_id is not None:
             payload["ManifestID"] = self._manifest_id
+        if self._timeout_seconds > 0:
+            payload["timeoutSeconds"] = self._timeout_seconds
         if self._state is not None:
             payload["state"] = self._state
         if self._capabilities is not None:

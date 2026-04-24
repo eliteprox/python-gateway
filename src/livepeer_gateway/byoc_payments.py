@@ -62,6 +62,8 @@ class BYOCPaymentSession(BasePaymentSession):
         if not isinstance(parameters, str):
             raise PaymentError("parameters must be a JSON string")
 
+        self.set_timeout_seconds(timeout_seconds)
+
         from .orchestrator import _join_signer_endpoint, post_json
 
         url = _join_signer_endpoint(self._signer_url, "/sign-byoc-job")
