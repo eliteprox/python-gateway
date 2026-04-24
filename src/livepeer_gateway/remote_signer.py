@@ -176,12 +176,15 @@ def get_orch_info_sig(
 class ByocJobSigningInput:
     """
     Payload we send to the remote signer's ``POST /sign-byoc-job``. The
-    signer concatenates ``request + parameters`` and signs the result
-    with the gateway's eth key, mirroring the embedded-key path at
+    signer flattens this payload into the V1 binary format and signs it
+    with the gateway's eth key, mirroring
     ``byoc/utils.go::(*gatewayJob).sign()`` in go-livepeer.
     """
+    id: str
+    capability: str
     request: str
     parameters: str
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -211,7 +214,7 @@ def sign_byoc_job(
     Request a one-off job signature from the remote signer.
 
     Called once per BYOC job (not cached across requests) because the
-    ``request`` and ``parameters`` payload differs per call. The
+    job payload differs per call. The
     gateway-side embedded-key equivalent is
     ``byoc/utils.go::(*gatewayJob).sign()``.
     """
@@ -224,8 +227,11 @@ def sign_byoc_job(
 
     url = f"{_http_origin(signer_url)}/sign-byoc-job"
     payload: dict[str, Any] = {
+        "id": signing_input.id,
+        "capability": signing_input.capability,
         "request": signing_input.request,
         "parameters": signing_input.parameters,
+        "timeout_seconds": signing_input.timeout_seconds,
     }
 
     try:

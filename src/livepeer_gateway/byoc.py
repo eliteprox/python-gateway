@@ -97,10 +97,13 @@ class ByocStreamResponse:
 def _build_request_str(body: Any) -> str:
     """
     Canonical request string used in both the signed payload and the
-    Livepeer header. The signer signs ``request + parameters``; those
-    exact bytes must be identical to what lands in ``JobRequest.Request``
-    on the header, otherwise the orchestrator's VerifySig recovers a
-    different address.
+    Livepeer header.
+
+    The signer signs a V1 flattened payload that includes this ``request``
+    field and ``parameters`` plus ``id``, ``capability``, and
+    ``timeout_seconds``. These values must match exactly what lands in the
+    Livepeer header's JobRequest fields, otherwise the orchestrator's
+    VerifySig fails.
     """
     if isinstance(body, (bytes, bytearray)):
         return bytes(body).decode("utf-8")
@@ -309,23 +312,28 @@ def byoc_request(
 
     body_bytes, encoded_ct = _encode_body(body, content_type)
 
-    # Compose request + parameters once, before signing. The exact byte
-    # sequence that goes to the signer must also be what lands in the
-    # Livepeer header's JobRequest fields — the orch re-concatenates
-    # Request + Parameters and recovers the sender from the signature.
-    # Any drift (whitespace, key order, case) breaks VerifySig.
+    # Compose job fields once, before signing. The exact values that go to
+    # the signer must also be what lands in the Livepeer header's JobRequest
+    # fields (id/capability/request/parameters/timeout_seconds), otherwise
+    # orchestrator VerifySig fails.
     request_str = _build_request_str(body)
     parameters_str = _build_parameters_str(options_filter)
+    job_id = secrets.token_hex(16)
     if not resolved_signer_url:
         raise LivepeerGatewayError(
             "byoc_request requires a signer_url (BYOC jobs must be signed by the remote signer)"
         )
     job_sig = sign_byoc_job(
         resolved_signer_url,
-        ByocJobSigningInput(request=request_str, parameters=parameters_str),
+        ByocJobSigningInput(
+            id=job_id,
+            capability=capability_name,
+            request=request_str,
+            parameters=parameters_str,
+            timeout_seconds=timeout_seconds,
+        ),
         signer_headers=resolved_signer_headers,
     )
-    job_id = secrets.token_hex(16)
     livepeer_header = _build_livepeer_header(
         id=job_id,
         capability=capability_name,
