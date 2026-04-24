@@ -82,6 +82,10 @@ class DecoderQueueStats:
     # decoder output queue by MediaOutput.frames().
     total_output_items_dequeued: int
 
+    # output_wait_s: cumulative wall-clock time spent blocked waiting for the
+    # next decoder output item to become available.
+    output_wait_s: float
+
     # queue_s: aggregate span of source PTS media-time between the most-
     # recently enqueued decoded frame and the most-recently dequeued decoded
     # frame. Approximates how much media time is sitting in the decoder output
@@ -175,6 +179,7 @@ class _BlockingByteStream:
             total_bytes_read=total_bytes_read,
             output_items_queued=0,
             total_output_items_dequeued=0,
+            output_wait_s=0.0,
             queue_s=0.0,
             processed_s=0.0,
         )
@@ -259,6 +264,7 @@ class MpegTsDecoder:
         self._output: "queue.Queue[object]" = queue.Queue()
         self._total_output_items_enqueued = 0
         self._total_output_items_dequeued = 0
+        self._output_wait_s = 0.0
         # Aggregate source-PTS media-time watermarks across all streams for
         # output-queue telemetry. Best-effort snapshots updated from producer
         # (decoder thread) and consumer (get()) without per-op locks.
@@ -285,7 +291,9 @@ class MpegTsDecoder:
         self._thread.join()
 
     def get(self) -> object:
+        started_wait = time.monotonic()
         item = self._output.get()
+        self._output_wait_s += max(0.0, time.monotonic() - started_wait)
         self._total_output_items_dequeued += 1
         if isinstance(item, DecodedMediaFrame):
             pts_time = item.pts_time
@@ -326,6 +334,7 @@ class MpegTsDecoder:
             total_bytes_read=reader_stats.total_bytes_read,
             output_items_queued=max(0, total_output_items_enqueued - total_output_items_dequeued),
             total_output_items_dequeued=total_output_items_dequeued,
+            output_wait_s=self._output_wait_s,
             queue_s=queue_s,
             processed_s=processed_s,
         )
