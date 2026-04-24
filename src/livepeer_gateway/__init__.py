@@ -13,7 +13,12 @@ from .media_publish import (
     TrackQueueStats,
     VideoOutputConfig,
 )
-from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
+from .media_decode import (
+    AudioDecodedMediaFrame,
+    DecodedMediaFrame,
+    DemuxedMediaPacket,
+    VideoDecodedMediaFrame,
+)
 from .media_output import MediaOutput, MediaOutputStats
 from .errors import OrchestratorRejection
 from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
@@ -58,6 +63,7 @@ __all__ = [
     "MediaOutputStats",
     "AudioDecodedMediaFrame",
     "DecodedMediaFrame",
+    "DemuxedMediaPacket",
     "ChannelReader",
     "JSONLReader",
     "JSONLWriter",
@@ -80,4 +86,3 @@ __all__ = [
     "TrickleSubscriberStats",
     "VideoDecodedMediaFrame",
 ]
-

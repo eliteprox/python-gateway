@@ -38,6 +38,21 @@ class AudioDecodedMediaFrame(DecodedMediaFrame):
     samples: Optional[int]
 
 
+@dataclass(frozen=True)
+class DemuxedMediaPacket:
+    kind: str
+    stream_index: int
+    packet: av.Packet
+    pts: Optional[int]
+    dts: Optional[int]
+    time_base: Optional[Fraction]
+    pts_time: Optional[float]
+    dts_time: Optional[float]
+    is_keyframe: bool
+    size: int
+    demuxed_at: float
+
+
 _EOF = object()
 _END = object()
 
@@ -257,8 +272,55 @@ def _build_decoded_frame(
     )
 
 
-class MpegTsDecoder:
-    def __init__(self) -> None:
+def _stream_kind(packet: av.Packet) -> str:
+    stream = getattr(packet, "stream", None)
+    kind = getattr(stream, "type", None)
+    if isinstance(kind, str) and kind:
+        return kind
+    return "unknown"
+
+
+def _packet_time_base(packet: av.Packet) -> Optional[Fraction]:
+    time_base = getattr(packet, "time_base", None)
+    if time_base is None:
+        stream = getattr(packet, "stream", None)
+        time_base = getattr(stream, "time_base", None)
+    if time_base is None:
+        return None
+    return _fraction_from_time_base(time_base)
+
+
+def _build_demuxed_packet(
+    packet: av.Packet,
+    *,
+    demuxed_at: float,
+) -> DemuxedMediaPacket:
+    time_base = _packet_time_base(packet)
+    pts = getattr(packet, "pts", None)
+    dts = getattr(packet, "dts", None)
+    return DemuxedMediaPacket(
+        kind=_stream_kind(packet),
+        stream_index=getattr(getattr(packet, "stream", None), "index", -1),
+        packet=packet,
+        pts=pts,
+        dts=dts,
+        time_base=time_base,
+        pts_time=_time_from_pts(pts, time_base),
+        dts_time=_time_from_pts(dts, time_base),
+        is_keyframe=bool(getattr(packet, "is_keyframe", False)),
+        size=int(getattr(packet, "size", 0) or 0),
+        demuxed_at=demuxed_at,
+    )
+
+
+def _item_pts_time(item: object) -> Optional[float]:
+    if isinstance(item, (DecodedMediaFrame, DemuxedMediaPacket)):
+        return item.pts_time
+    return None
+
+
+class _MpegTsOutputWorker:
+    def __init__(self, *, thread_name: str) -> None:
         self._reader = _BlockingByteStream()
         # TODO: add backpressure here too (bounded queue) if callers are slow to consume.
         self._output: "queue.Queue[object]" = queue.Queue()
@@ -272,7 +334,7 @@ class MpegTsDecoder:
         self._max_pts_time_dequeued: Optional[float] = None
         self._min_pts_time_dequeued: Optional[float] = None
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="MpegTsDecoder", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=thread_name, daemon=True)
 
     def start(self) -> None:
         self._thread.start()
@@ -295,19 +357,18 @@ class MpegTsDecoder:
         item = self._output.get()
         self._output_wait_s += max(0.0, time.monotonic() - started_wait)
         self._total_output_items_dequeued += 1
-        if isinstance(item, DecodedMediaFrame):
-            pts_time = item.pts_time
-            if pts_time is not None:
-                if (
-                    self._max_pts_time_dequeued is None
-                    or pts_time > self._max_pts_time_dequeued
-                ):
-                    self._max_pts_time_dequeued = pts_time
-                if (
-                    self._min_pts_time_dequeued is None
-                    or pts_time < self._min_pts_time_dequeued
-                ):
-                    self._min_pts_time_dequeued = pts_time
+        pts_time = _item_pts_time(item)
+        if pts_time is not None:
+            if (
+                self._max_pts_time_dequeued is None
+                or pts_time > self._max_pts_time_dequeued
+            ):
+                self._max_pts_time_dequeued = pts_time
+            if (
+                self._min_pts_time_dequeued is None
+                or pts_time < self._min_pts_time_dequeued
+            ):
+                self._min_pts_time_dequeued = pts_time
         return item
 
     def get_stats(self) -> DecoderQueueStats:
@@ -341,14 +402,21 @@ class MpegTsDecoder:
 
     def _put_output_item(self, item: object) -> None:
         self._total_output_items_enqueued += 1
-        if isinstance(item, DecodedMediaFrame):
-            pts_time = item.pts_time
-            if pts_time is not None and (
-                self._max_pts_time_enqueued is None
-                or pts_time > self._max_pts_time_enqueued
-            ):
-                self._max_pts_time_enqueued = pts_time
+        pts_time = _item_pts_time(item)
+        if pts_time is not None and (
+            self._max_pts_time_enqueued is None
+            or pts_time > self._max_pts_time_enqueued
+        ):
+            self._max_pts_time_enqueued = pts_time
         self._output.put(item)
+
+    def _run(self) -> None:
+        raise NotImplementedError
+
+
+class MpegTsDecoder(_MpegTsOutputWorker):
+    def __init__(self) -> None:
+        super().__init__(thread_name="MpegTsDecoder")
 
     def _run(self) -> None:
         container: Optional[av.container.InputContainer] = None
@@ -375,6 +443,36 @@ class MpegTsDecoder:
                         decoded_at=decoded_at,
                     )
                     self._put_output_item(decoded)
+        except Exception as e:
+            self._put_output_item(_DecoderError(e))
+        finally:
+            if container is not None:
+                try:
+                    container.close()
+                except Exception:
+                    pass
+            self._put_output_item(_END)
+
+
+class MpegTsPacketDemuxer(_MpegTsOutputWorker):
+    def __init__(self) -> None:
+        super().__init__(thread_name="MpegTsPacketDemuxer")
+
+    def _run(self) -> None:
+        container: Optional[av.container.InputContainer] = None
+        try:
+            container = av.open(self._reader, format="mpegts", mode="r")
+            for packet in container.demux():
+                if self._stop.is_set():
+                    break
+                if packet is None:
+                    continue
+                self._put_output_item(
+                    _build_demuxed_packet(
+                        packet,
+                        demuxed_at=time.time(),
+                    )
+                )
         except Exception as e:
             self._put_output_item(_DecoderError(e))
         finally:

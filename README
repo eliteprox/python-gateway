@@ -48,6 +48,13 @@ uv run examples/camera_capture.py localhost:8935 --output - | ffplay -fflags nob
 uv run examples/camera_capture.py localhost:8935 --output out.ts
 ```
 
+Read demuxed media output packets without decoding
+```python
+async with job.media_output() as output:
+    async for packet in output.packets():
+        print(packet.kind, packet.stream_index, packet.pts_time, packet.size)
+```
+
 Composite camera input and decoded output side-by-side with PTS delta
 ```
 uv sync --group examples

@@ -16,8 +16,10 @@ from .errors import LivepeerGatewayError
 from .media_decode import (
     AudioDecodedMediaFrame,
     DecodedMediaFrame,
+    DemuxedMediaPacket,
     DecoderQueueStats,
     MpegTsDecoder,
+    MpegTsPacketDemuxer,
     VideoDecodedMediaFrame,
     decoder_error,
     is_decoder_end,
@@ -49,8 +51,12 @@ class MediaOutputStats:
     consumer_lag_skip_latest: int
     consumer_lag_retry_earliest: int
     consumer_lag_fail: int
+    video_packets_demuxed: int
+    audio_packets_demuxed: int
+    other_packets_demuxed: int
     video_frames_decoded: int
     audio_frames_decoded: int
+    packet_errors: int
     decode_errors: int
     # decoder: decode pipeline queue metrics, including the distinction between
     # queued_bytes in the cross-thread input queue and buffered_bytes already
@@ -71,8 +77,12 @@ class MediaOutputStats:
             f"consumer_lag_skip_latest={self.consumer_lag_skip_latest}, "
             f"consumer_lag_retry_earliest={self.consumer_lag_retry_earliest}, "
             f"consumer_lag_fail={self.consumer_lag_fail}, "
+            f"video_packets_demuxed={self.video_packets_demuxed}, "
+            f"audio_packets_demuxed={self.audio_packets_demuxed}, "
+            f"other_packets_demuxed={self.other_packets_demuxed}, "
             f"video_frames_decoded={self.video_frames_decoded}, "
             f"audio_frames_decoded={self.audio_frames_decoded}, "
+            f"packet_errors={self.packet_errors}, "
             f"decode_errors={self.decode_errors}"
             f"{', decoder=' + str(self.decoder) if self.decoder is not None else ''}"
             f"{', subscriber=' + str(self.subscriber) if self.subscriber is not None else ''}"
@@ -87,6 +97,7 @@ class MediaOutput:
     Exposes:
       - per-segment iteration (SegmentReader objects)
       - continuous byte stream (bytes chunks)
+      - demuxed MPEG-TS packets
       - individual audio and video frames
 
     Segments are sourced from a single shared subscriber so that multiple
@@ -99,7 +110,7 @@ class MediaOutput:
         max_retries: Max retries for segment fetches.
         max_segment_bytes: Safety bound for a single segment size.
         connection_close: Whether to close connections after each segment.
-        chunk_size: Byte chunk size yielded by bytes()/frames().
+        chunk_size: Byte chunk size yielded by bytes()/packets()/frames().
         max_segments: Max number of segments retained in memory.
         on_lag: Behavior when a consumer falls behind the segment window.
             - LagPolicy.FAIL: raise LivepeerGatewayError.
@@ -145,7 +156,7 @@ class MediaOutput:
         self._next_local_seq = 0
         self._base_seq = 0
         self._started_at = time.time()
-        self._decoder: Optional[MpegTsDecoder] = None
+        self._processor: Optional[MpegTsDecoder | MpegTsPacketDemuxer] = None
         self._last_decoder_stats: Optional[DecoderQueueStats] = None
         self._stats: dict[str, int] = {
             "segments_consumed": 0,
@@ -157,8 +168,12 @@ class MediaOutput:
             "consumer_lag_skip_latest": 0,
             "consumer_lag_retry_earliest": 0,
             "consumer_lag_fail": 0,
+            "video_packets_demuxed": 0,
+            "audio_packets_demuxed": 0,
+            "other_packets_demuxed": 0,
             "video_frames_decoded": 0,
             "audio_frames_decoded": 0,
+            "packet_errors": 0,
             "decode_errors": 0,
         }
 
@@ -194,6 +209,60 @@ class MediaOutput:
 
         return _iter()
 
+    def packets(
+        self,
+    ) -> AsyncIterator[DemuxedMediaPacket]:
+        """
+        Read the trickle media channel, demux MPEG-TS, and yield packets.
+        """
+
+        async def _iter() -> AsyncIterator[DemuxedMediaPacket]:
+            demuxer = MpegTsPacketDemuxer()
+            self._processor = demuxer
+            demuxer.start()
+
+            async def _feed() -> None:
+                async for chunk in self._iter_bytes():
+                    demuxer.feed(chunk)
+                demuxer.close()
+
+            producer_task = asyncio.create_task(_feed())
+            try:
+                while True:
+                    item = await asyncio.to_thread(demuxer.get)
+                    err = decoder_error(item)
+                    if err is not None:
+                        self._stats["packet_errors"] += 1
+                        raise LivepeerGatewayError(
+                            f"Media demux error: {err.__class__.__name__}: {err}"
+                        ) from err
+                    if is_decoder_end(item):
+                        if producer_task.done():
+                            exc = producer_task.exception()
+                            if exc:
+                                raise exc
+                        break
+                    if isinstance(item, DemuxedMediaPacket):
+                        if item.kind == "video":
+                            self._stats["video_packets_demuxed"] += 1
+                        elif item.kind == "audio":
+                            self._stats["audio_packets_demuxed"] += 1
+                        else:
+                            self._stats["other_packets_demuxed"] += 1
+                        yield item
+            finally:
+                demuxer.stop()
+                if not producer_task.done():
+                    producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
+                await asyncio.to_thread(demuxer.join)
+                self._last_decoder_stats = demuxer.get_stats()
+                if self._processor is demuxer:
+                    self._processor = None
+
+        return _iter()
+
     def frames(
         self,
     ) -> AsyncIterator[AudioDecodedMediaFrame | VideoDecodedMediaFrame]:
@@ -203,7 +272,7 @@ class MediaOutput:
 
         async def _iter() -> AsyncIterator[AudioDecodedMediaFrame | VideoDecodedMediaFrame]:
             decoder = MpegTsDecoder()
-            self._decoder = decoder
+            self._processor = decoder
             decoder.start()
 
             async def _feed() -> None:
@@ -241,8 +310,8 @@ class MediaOutput:
                     await producer_task
                 await asyncio.to_thread(decoder.join)
                 self._last_decoder_stats = decoder.get_stats()
-                if self._decoder is decoder:
-                    self._decoder = None
+                if self._processor is decoder:
+                    self._processor = None
 
         return _iter()
 
@@ -363,7 +432,9 @@ class MediaOutput:
         await self.close()
 
     def get_stats(self) -> MediaOutputStats:
-        decoder_stats = self._decoder.get_stats() if self._decoder is not None else self._last_decoder_stats
+        decoder_stats = (
+            self._processor.get_stats() if self._processor is not None else self._last_decoder_stats
+        )
         return MediaOutputStats(
             elapsed_s=max(0.0, time.time() - self._started_at),
             segments_consumed=self._stats["segments_consumed"],
@@ -375,8 +446,12 @@ class MediaOutput:
             consumer_lag_skip_latest=self._stats["consumer_lag_skip_latest"],
             consumer_lag_retry_earliest=self._stats["consumer_lag_retry_earliest"],
             consumer_lag_fail=self._stats["consumer_lag_fail"],
+            video_packets_demuxed=self._stats["video_packets_demuxed"],
+            audio_packets_demuxed=self._stats["audio_packets_demuxed"],
+            other_packets_demuxed=self._stats["other_packets_demuxed"],
             video_frames_decoded=self._stats["video_frames_decoded"],
             audio_frames_decoded=self._stats["audio_frames_decoded"],
+            packet_errors=self._stats["packet_errors"],
             decode_errors=self._stats["decode_errors"],
             decoder=decoder_stats,
             subscriber=(self._sub.get_stats() if self._sub is not None else None),
