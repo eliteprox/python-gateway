@@ -59,7 +59,7 @@ class BasePaymentSession:
             "type": self._payment_type,
         }
         if self._manifest_id is not None:
-            payload["ManifestID"] = self._manifest_id
+            payload["manifestID"] = self._manifest_id
         if self._timeout_seconds > 0:
             payload["timeoutSeconds"] = self._timeout_seconds
         if self._state is not None:
