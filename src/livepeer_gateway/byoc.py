@@ -379,7 +379,9 @@ def byoc_request(
             raise
 
         try:
-            info = job_token_to_orch_info(job_token)
+            info = job_token_to_orch_info(
+                job_token, capability_name=capability_name
+            )
             session = PaymentSession(
                 resolved_signer_url,
                 info,

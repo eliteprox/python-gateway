@@ -38,6 +38,11 @@ _LOG = logging.getLogger(__name__)
 
 _BATCH_SIZE = 5
 
+# go-livepeer/core/capabilities.go: Capability_BYOC = 37. Required on synthetic
+# OrchestratorInfo.price_info for /generate-live-payment type "byoc-request"
+# (server/remote_signer.go resolvePriceInfo + BYOC branch).
+_BYOC_CAPABILITY_PROTO = 37
+
 
 @dataclass(frozen=True)
 class JobToken:
@@ -184,10 +189,20 @@ def fetch_job_token(
     )
 
 
-def job_token_to_orch_info(jt: JobToken) -> lp_rpc_pb2.OrchestratorInfo:
+def job_token_to_orch_info(
+    jt: JobToken,
+    *,
+    capability_name: str,
+) -> lp_rpc_pb2.OrchestratorInfo:
     """Synthesize the subset of OrchestratorInfo that the remote signer
     (/generate-live-payment, server/remote_signer.go:253-263) and BYOC payment
     flow consume.
+
+    ``capability_name`` is the registered BYOC capability (e.g. ``text-reversal``).
+    The signer's ``byoc-request`` path requires ``price_info`` to identify BYOC
+    via ``capability=37`` and a non-empty ``constraint`` matching the external
+    capability; otherwise it errors with "missing BYOC capability in
+    OrchestratorInfo price_info.constraint".
 
     A synthetic AuthToken with a 30-minute future expiration is attached: the
     LV2V-style signer routes through shouldRefreshSession
@@ -235,6 +250,8 @@ def job_token_to_orch_info(jt: JobToken) -> lp_rpc_pb2.OrchestratorInfo:
 
     info.price_info.pricePerUnit = int(jt.price.get("pricePerUnit") or 0)
     info.price_info.pixelsPerUnit = int(jt.price.get("pixelsPerUnit") or 0)
+    info.price_info.capability = _BYOC_CAPABILITY_PROTO
+    info.price_info.constraint = capability_name
 
     # Synthetic auth token: go-livepeer's authTokenValidPeriod is 30 min and
     # shouldRefreshSession refreshes at the last 10% of the period, so any
