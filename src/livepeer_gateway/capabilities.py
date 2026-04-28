@@ -45,6 +45,7 @@ class CapabilityId(IntEnum):
     IMAGE_TO_TEXT = 34
     LIVE_VIDEO_TO_VIDEO = 35
     TEXT_TO_SPEECH = 36
+    BYOC = 37
 
 CAPABILITY_ID_TO_NAME: dict[int, str] = {
     -2: "Invalid",
@@ -85,6 +86,7 @@ CAPABILITY_ID_TO_NAME: dict[int, str] = {
     34: "Image to text",
     35: "Live video to video",
     36: "Text to speech",
+    37: "BYOC",
 }
 
 
@@ -150,6 +152,45 @@ def capability_pipeline_id(cap_id: int) -> Optional[str]:
     except ValueError:
         return None
     return enum_name.lower().replace("_", "-")
+
+
+def capability_id_from_pipeline(pipeline_id: str) -> Optional[CapabilityId]:
+    """
+    Reverse of capability_pipeline_id: convert a pipeline ID back to a CapabilityId.
+
+    Example:
+        live-video-to-video -> CapabilityId.LIVE_VIDEO_TO_VIDEO
+        byoc -> CapabilityId.BYOC
+    """
+    enum_name = pipeline_id.upper().replace("-", "_")
+    try:
+        return CapabilityId[enum_name]
+    except KeyError:
+        return None
+
+
+def build_capabilities_from_queries(queries: list[str]) -> Optional[lp_rpc_pb2.Capabilities]:
+    """
+    Build a Capabilities protobuf from pipeline-id/model query strings.
+
+    Each query has the form "pipeline-id/model" (e.g. "byoc/text-reversal",
+    "live-video-to-video/noop"). Returns None if no valid queries are provided.
+    """
+    caps = lp_rpc_pb2.Capabilities()
+    found = False
+    for q in queries:
+        parts = q.split("/", 1)
+        pipeline_id = parts[0]
+        model = parts[1] if len(parts) > 1 else None
+        cap = capability_id_from_pipeline(pipeline_id)
+        if cap is None:
+            continue
+        cap_id = int(cap)
+        caps.capacities[cap_id] = 1
+        if model:
+            caps.constraints.PerCapability[cap_id].models[model]
+        found = True
+    return caps if found else None
 
 
 def capabilities_to_query(caps: Optional[lp_rpc_pb2.Capabilities]) -> list[str]:

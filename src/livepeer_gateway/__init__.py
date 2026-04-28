@@ -1,8 +1,15 @@
+from .byoc import BYOCJob, BYOCJobRequest, start_byoc_job
+from .byoc_payments import BYOCPaymentSession
 from .capabilities import CapabilityId, build_capabilities
 from .channel_reader import ChannelReader, JSONLReader
 from .channel_writer import ChannelWriter, JSONLWriter
 from .control import Control, ControlConfig, ControlMode
-from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, PaymentError
+from .errors import (
+    LivepeerGatewayError,
+    NoOrchestratorAvailableError,
+    PaymentError,
+    PaymentRequiredError,
+)
 from .events import Events
 from .media_publish import (
     AudioOutputConfig,
@@ -39,6 +46,9 @@ from .segment_reader import SegmentReader, SegmentReaderStats
 from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 
 __all__ = [
+    "BYOCJob",
+    "BYOCJobRequest",
+    "BYOCPaymentSession",
     "Control",
     "ControlConfig",
     "ControlMode",
@@ -52,6 +62,7 @@ __all__ = [
     "NoOrchestratorAvailableError",
     "OrchestratorRejection",
     "PaymentError",
+    "PaymentRequiredError",
     "MediaPublish",
     "MediaPublishConfig",
     "MediaPublishTrack",
@@ -73,6 +84,7 @@ __all__ = [
     "SelectionCursor",
     "orchestrator_selector",
     "StartJobRequest",
+    "start_byoc_job",
     "start_lv2v",
     "start_scope",
     "TricklePublishError",

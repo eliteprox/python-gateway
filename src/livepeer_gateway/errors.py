@@ -31,5 +31,9 @@ class SkipPaymentCycle(LivepeerGatewayError):
     """Raised when the signer returns HTTP 482 to skip a payment cycle."""
 
 
+class PaymentRequiredError(LivepeerGatewayError):
+    """Raised when an endpoint returns HTTP 402 and requires payment."""
+
+
 class PaymentError(LivepeerGatewayError):
     """Raised when a PaymentSession operation fails."""
