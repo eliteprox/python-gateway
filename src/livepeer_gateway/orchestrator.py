@@ -215,8 +215,10 @@ def _join_signer_endpoint(signer_url: str, path: str) -> str:
     """
     if not isinstance(signer_url, str) or not signer_url.strip():
         raise ValueError("signer_url must be a non-empty string")
+    parsed = _parse_http_url(signer_url, context="signer_url")
+    base_path = (parsed.path or "").rstrip("/")
+    base = urlunparse(parsed._replace(path=base_path, params="", query="", fragment=""))
     suffix = path if path.startswith("/") else f"/{path}"
-    base = signer_url.strip().rstrip("/")
     if base.endswith(suffix):
         return base
     return f"{base}{suffix}"

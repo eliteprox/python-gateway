@@ -23,7 +23,7 @@ class BYOCPaymentSession(BasePaymentSession):
     - Generates time-based BYOC payments via ``/generate-live-payment``
       (``type: "byoc"``, ``manifestID = capability_name``).
     - Sends recurring stream payments to the orchestrator's
-      ``/process/stream/payment`` endpoint (or operator override).
+      ``/ai/stream/payment`` endpoint (or operator override).
     """
 
     def __init__(

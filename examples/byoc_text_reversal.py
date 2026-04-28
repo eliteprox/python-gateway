@@ -108,47 +108,58 @@ async def _amain() -> None:
 
         job.start_payment_sender()
 
-        if job.control is None:
-            print("ERROR: job has no control_url; cannot send text.")
-            return
-
-        result_received = asyncio.Event()
-        received_payload: dict = {}
-
-        async def read_results() -> None:
-            if job.events is None:
-                print("WARN: no events channel on job; results will not be captured.")
-                result_received.set()
+        reader_task: Optional[asyncio.Task] = None
+        stop_sent = False
+        try:
+            if job.control is None:
+                print("ERROR: job has no control_url; cannot send text.")
                 return
-            async for msg in job.events():
-                if isinstance(msg, dict) and isinstance(msg.get("reversed"), str):
-                    received_payload.update(msg)
+
+            result_received = asyncio.Event()
+            received_payload: dict = {}
+
+            async def read_results() -> None:
+                if job.events is None:
+                    print("WARN: no events channel on job; results will not be captured.")
                     result_received.set()
                     return
+                async for msg in job.events():
+                    if isinstance(msg, dict) and isinstance(msg.get("reversed"), str):
+                        received_payload.update(msg)
+                        result_received.set()
+                        return
 
-        reader_task = asyncio.create_task(read_results())
+            reader_task = asyncio.create_task(read_results())
 
-        await asyncio.sleep(0.15)
-        await job.control.write({"text": args.text})
-        print(f"sent: {{\"text\": {args.text!r}}}")
+            await asyncio.sleep(0.15)
+            await job.control.write({"text": args.text})
+            print(f"sent: {{\"text\": {args.text!r}}}")
 
-        try:
-            await asyncio.wait_for(result_received.wait(), timeout=args.timeout_seconds)
-        except asyncio.TimeoutError:
-            print("ERROR: timed out waiting for reversal result.")
-            return
+            try:
+                await asyncio.wait_for(result_received.wait(), timeout=args.timeout_seconds)
+            except asyncio.TimeoutError:
+                print("ERROR: timed out waiting for reversal result.")
+                return
 
-        original = received_payload.get("original") or received_payload.get("text") or args.text
-        reversed_text = received_payload.get("reversed")
-        print(f"result: {original!r} -> {reversed_text!r}")
-        print("payload:", json.dumps(received_payload, indent=2, sort_keys=True))
+            original = received_payload.get("original") or received_payload.get("text") or args.text
+            reversed_text = received_payload.get("reversed")
+            print(f"result: {original!r} -> {reversed_text!r}")
+            print("payload:", json.dumps(received_payload, indent=2, sort_keys=True))
 
-        stop_resp = await job.stop()
-        print(f"stop: status={stop_resp['status_code']}")
-
-        await asyncio.sleep(max(0.0, args.output_grace_seconds))
-        reader_task.cancel()
-        await asyncio.gather(reader_task, return_exceptions=True)
+            stop_resp = await job.stop()
+            stop_sent = True
+            print(f"stop: status={stop_resp['status_code']}")
+        finally:
+            if not stop_sent:
+                try:
+                    stop_resp = await job.stop()
+                    print(f"stop: status={stop_resp['status_code']}")
+                except Exception as stop_err:
+                    print(f"WARN: failed to stop BYOC job: {stop_err}")
+            await asyncio.sleep(max(0.0, args.output_grace_seconds))
+            if reader_task is not None:
+                reader_task.cancel()
+                await asyncio.gather(reader_task, return_exceptions=True)
     except LivepeerGatewayError as err:
         print(f"ERROR: {err}")
     finally:

@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import sys
 from typing import Any
 
 from livepeer_gateway.capabilities import (
@@ -367,7 +368,17 @@ def main() -> None:
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
-    capabilities = build_capabilities_from_queries(args.caps) if args.caps else None
+    if args.caps:
+        capabilities = build_capabilities_from_queries(args.caps)
+        if not capabilities:
+            print(
+                f"ERROR: --caps {args.caps!r} did not parse into any valid capabilities "
+                f"(expected pipeline-id/model entries, e.g. 'byoc/text-reversal').",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        capabilities = None
 
     json_results: list[dict[str, Any]] = []
 

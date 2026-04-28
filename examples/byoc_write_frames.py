@@ -58,7 +58,9 @@ def _solid_rgb_frame(width: int, height: int, rgb: tuple[int, int, int]) -> av.V
 
 async def main() -> None:
     args = _parse_args()
-    frame_interval = 1.0 / max(1e-6, args.fps)
+    if args.fps <= 0:
+        raise SystemExit("--fps must be > 0")
+    frame_interval = 1.0 / args.fps
 
     job = None
     try:

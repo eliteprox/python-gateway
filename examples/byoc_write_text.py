@@ -108,6 +108,12 @@ def _parse_args() -> argparse.Namespace:
         default=1.5,
         help="Extra time to wait for final event/data output after stop (default: 1.5).",
     )
+    p.add_argument(
+        "--results-timeout",
+        type=float,
+        default=30.0,
+        help="Max seconds to wait for expected results after control messages finish (default: 30).",
+    )
     return p.parse_args()
 
 
@@ -217,7 +223,28 @@ async def main() -> None:
         try:
             await control_task
             if expected_results > 0 and primary_results_task is not None:
-                await results_complete.wait()
+                wait_task = asyncio.create_task(results_complete.wait())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {wait_task, primary_results_task},
+                        timeout=max(0.05, float(args.results_timeout)),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not wait_task.done():
+                        wait_task.cancel()
+                        await asyncio.gather(wait_task, return_exceptions=True)
+                if not results_complete.is_set():
+                    if primary_results_task in done:
+                        print(
+                            f"WARN: results channel ended before {expected_results} "
+                            f"result(s) received; stopping job."
+                        )
+                    else:
+                        print(
+                            f"ERROR: timed out after {args.results_timeout}s waiting for "
+                            f"{expected_results} result(s); stopping job."
+                        )
             stop_resp = await job.stop()
             stop_sent = True
             print(f"stop: {_json_dump(stop_resp.get('body') or {'status_code': stop_resp['status_code']})}")
