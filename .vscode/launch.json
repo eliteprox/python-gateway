@@ -1,0 +1,133 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: get_orchestrator_info",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/get_orchestrator_info.py",
+            "console": "integratedTerminal",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--signer",
+                "https://signer.eliteencoder.net", //This is an unauthenticated remote signer you can use without credentials
+            ],
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: write_frames",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/write_frames.py",
+            "args": [
+                "https://hky.eliteencoder.net:8936",
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+                "--model",
+                "noop",
+                "--count",
+                "900000",
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: select_orchestrator",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/select_orchestrator.py",
+            "args": [
+                "--signer",
+                "http://10.10.7.61:8081",
+                "--debug"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: logout (PymtHouse)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/logout.py",
+            "args": [
+                "--billing-url",
+                "https://pymthouse.com",
+                "--client-id",
+                "app_3ee9ae159ea7ad4c03b52849",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: BYOC text-reversal",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_frames.py",
+            "args": [
+                "https://10.10.7.61:8935",
+                "--signer",
+                "http://10.10.7.61:9999",
+                "--capability",
+                "text-reversal",
+                "--count",
+                "900",
+                "--text",
+                "hello from debug",
+                "--text",
+                "livepeer byoc",
+                "--text",
+                "cursor",
+                "--control-interval",
+                "1.0",
+                "--output-grace-seconds",
+                "2.0",
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "ALLOW_HTTP_SIGNER": "1"
+            },
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: BYOC text-only",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/byoc_write_text.py",
+            "args": [
+                "https://10.10.7.61:8935",
+                "--signer",
+                "http://10.10.7.61:9999",
+                "--capability",
+                "text-reversal",
+                "--text",
+                "hello from debug",
+                "--text",
+                "livepeer byoc",
+                "--text",
+                "cursor",
+                "--control-interval",
+                "1.0",
+                "--output-grace-seconds",
+                "2.0"
+            ],
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "ALLOW_HTTP_SIGNER": "1"
+            },
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true
+        },
+    ]
+}

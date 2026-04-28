@@ -4,7 +4,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.request import urlopen
+
+import httpx
 
 
 PROTO_URL = (
@@ -19,8 +20,9 @@ def main() -> None:
     proto_path = root / "lp_rpc.proto"
 
     print(f"[codegen] Downloading {PROTO_URL}")
-    with urlopen(PROTO_URL) as resp:
-        proto_path.write_bytes(resp.read())
+    resp = httpx.get(PROTO_URL)
+    resp.raise_for_status()
+    proto_path.write_bytes(resp.content)
 
     print("[codegen] Running grpc_tools.protoc")
     subprocess.check_call(

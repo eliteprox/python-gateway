@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import ssl
-from functools import lru_cache
+import os
 from typing import Any, Optional, Sequence
 from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urlparse, urlunparse
-from urllib.error import URLError, HTTPError
-from urllib.request import Request, urlopen
+
+import httpx
 
 from . import lp_rpc_pb2
 from .capabilities import capabilities_to_query
@@ -26,36 +25,16 @@ def _truncate(s: str, max_len: int = 2000) -> str:
         return s
     return s[:max_len] + f"...(+{len(s) - max_len} chars)"
 
-def _http_error_body(e: HTTPError) -> str:
+def _extract_error_message(resp: httpx.Response) -> str:
     """
-    Best-effort read of an HTTPError response body for debugging.
+    Best-effort extraction of a useful error message from an HTTP error response.
     """
-    try:
-        b = e.read()
-        if not b:
-            return ""
-        if isinstance(b, bytes):
-            return b.decode("utf-8", errors="replace")
-        return str(b)
-    except Exception:
-        return ""
-
-def _extract_error_message(e: HTTPError) -> str:
-    """
-    Best-effort extraction of a useful error message from an HTTPError body.
-
-    If the body is JSON and matches {"error": {"message": "..."}}, return that message.
-    Otherwise return the full body.
-
-    Always truncates the returned value for readability.
-    """
-    body = _http_error_body(e)
-    s = body.strip()
-    if not s:
+    body = resp.text.strip()
+    if not body:
         return ""
 
     try:
-        data = json.loads(s)
+        data = json.loads(body)
     except Exception:
         return _truncate(body)
 
@@ -81,6 +60,7 @@ def request_json(
     Make a JSON HTTP request and parse the JSON response.
 
     If method is None, defaults to POST when payload is provided, otherwise GET.
+    TLS certificate verification is disabled (matches gRPC behavior).
 
     Raises LivepeerGatewayError on HTTP/network/JSON parsing errors.
     """
@@ -88,44 +68,47 @@ def request_json(
         "Accept": "application/json",
         "User-Agent": "livepeer-python-gateway/0.1",
     }
-    body: Optional[bytes] = None
+    content: Optional[bytes] = None
     if payload is not None:
         req_headers["Content-Type"] = "application/json"
-        body = json.dumps(payload).encode("utf-8")
+        content = json.dumps(payload).encode("utf-8")
     if headers:
         req_headers.update(headers)
 
     resolved_method = method.upper() if method else ("POST" if payload is not None else "GET")
-    req = Request(url, data=body, headers=req_headers, method=resolved_method)
-
-    # Always ignore HTTPS certificate validation (matches our gRPC behavior).
-    ssl_ctx = ssl._create_unverified_context()
 
     try:
-        with urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
-            raw = resp.read().decode("utf-8")
-        data: Any = json.loads(raw)
-    except HTTPError as e:
-        body = _extract_error_message(e)
-        body_part = f"; body={body!r}" if body else ""
-        if e.code == 480:
-            raise SignerRefreshRequired(
-                f"Signer returned HTTP 480 (refresh session required) (url={url}){body_part}"
-            ) from e
-        if e.code == 482:
-            raise SkipPaymentCycle(
-                f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}"
-            ) from e
-        raise LivepeerGatewayError(
-            f"HTTP JSON error: HTTP {e.code} from endpoint (url={url}){body_part}"
-        ) from e
-    except ConnectionRefusedError as e:
+        with httpx.Client(verify=False, timeout=timeout) as client:
+            resp = client.request(
+                resolved_method,
+                url,
+                content=content,
+                headers=req_headers,
+            )
+        if resp.status_code >= 400:
+            body = _extract_error_message(resp)
+            body_part = f"; body={body!r}" if body else ""
+            if resp.status_code == 480:
+                raise SignerRefreshRequired(
+                    f"Signer returned HTTP 480 (refresh session required) (url={url}){body_part}"
+                )
+            if resp.status_code == 482:
+                raise SkipPaymentCycle(
+                    f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}"
+                )
+            raise LivepeerGatewayError(
+                f"HTTP JSON error: HTTP {resp.status_code} from endpoint (url={url}){body_part}"
+            )
+        data: Any = resp.json()
+    except (LivepeerGatewayError, SignerRefreshRequired, SkipPaymentCycle):
+        raise
+    except httpx.ConnectError as e:
         raise LivepeerGatewayError(
             f"HTTP JSON error: connection refused (is the server running? is the host/port correct?) (url={url})"
         ) from e
-    except URLError as e:
+    except httpx.HTTPError as e:
         raise LivepeerGatewayError(
-            f"HTTP JSON error: failed to reach endpoint: {getattr(e, 'reason', e)} (url={url})"
+            f"HTTP JSON error: failed to reach endpoint: {e} (url={url})"
         ) from e
     except json.JSONDecodeError as e:
         raise LivepeerGatewayError(f"HTTP JSON error: endpoint did not return valid JSON: {e} (url={url})") from e
@@ -203,6 +186,83 @@ def _http_origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def resolve_transcoder_http_url(origin: str, path_or_absolute_url: str) -> str:
+    """
+    Build the final HTTP URL for a BYOC (or similar) call rooted at an orchestrator
+    transcoder origin, or pass through an absolute URL.
+
+    When ``path_or_absolute_url`` starts with ``http://`` or ``https://``, it is
+    returned unchanged (for gateways or workers on a different host). Otherwise it is
+    treated as a path on ``origin`` (leading ``/`` added if missing).
+    """
+    o = path_or_absolute_url.strip()
+    if not o:
+        raise ValueError("path_or_absolute_url must be non-empty")
+    low = o.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return o
+    if not o.startswith("/"):
+        o = "/" + o
+    base = _http_origin(origin)
+    return f"{base}{o}"
+
+
+def _allow_http_signer_env() -> bool:
+    v = os.environ.get("ALLOW_HTTP_SIGNER", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _is_loopback_signer_hostname(hostname: Optional[str]) -> bool:
+    if not hostname:
+        return False
+    h = hostname.lower()
+    if h in ("localhost", "127.0.0.1", "::1"):
+        return True
+    return h.endswith(".local")
+
+
+def _ensure_signer_url_https_or_allowed(signer_url: str) -> None:
+    """
+    Reject cleartext http:// remote signer URLs unless explicitly allowed.
+
+    Allowed when ALLOW_HTTP_SIGNER is set to a truthy value (1/true/yes/on),
+    or when the host is loopback / *.local (local development).
+    """
+    url = signer_url.strip()
+    normalized = url if "://" in url else f"https://{url}"
+    parsed = urlparse(normalized)
+    if parsed.scheme != "http":
+        return
+    if _allow_http_signer_env() or _is_loopback_signer_hostname(parsed.hostname):
+        return
+    raise LivepeerGatewayError(
+        "Remote signer URL uses http://, which is not allowed by default. "
+        "Use https://, or set environment variable ALLOW_HTTP_SIGNER=1 for development."
+    )
+
+
+def _join_signer_endpoint(signer_url: str, path: str) -> str:
+        """
+        Join an endpoint path onto signer_url while preserving any existing base path.
+
+        Examples:
+        - https://pymthouse.com/api/signer + /sign-orchestrator-info
+            -> https://pymthouse.com/api/signer/sign-orchestrator-info
+        - https://pymthouse.com/api/signer/sign-orchestrator-info + same path
+            -> unchanged
+        """
+        if not isinstance(signer_url, str) or not signer_url.strip():
+                raise ValueError("signer_url must be a non-empty string")
+
+        _ensure_signer_url_https_or_allowed(signer_url)
+
+        suffix = path if path.startswith("/") else f"/{path}"
+        base = signer_url.strip().rstrip("/")
+        if base.endswith(suffix):
+                return base
+        return f"{base}{suffix}"
+
+
 def _append_caps(url: str, capabilities: Optional[lp_rpc_pb2.Capabilities]) -> str:
     """
     Append repeated `caps` query parameters to a URL.
@@ -262,7 +322,7 @@ def discover_orchestrators(
         discovery_endpoint = _parse_http_url(discovery_url).geturl()
         request_headers = discovery_headers
     elif signer_url:
-        discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+        discovery_endpoint = _join_signer_endpoint(signer_url, "/discover-orchestrators")
         request_headers = signer_headers
     else:
         _LOG.debug("discover_orchestrators failed: no discovery inputs")

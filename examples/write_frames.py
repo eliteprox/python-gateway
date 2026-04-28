@@ -25,6 +25,37 @@ def _parse_args() -> argparse.Namespace:
         help="Remote signer URL (no path). If omitted, runs in offchain mode.",
     )
     p.add_argument(
+        "--billing-url",
+        default=None,
+        help="Billing gateway URL (e.g. http://localhost:3000). "
+             "Auto-detects OIDC login or direct signer mode.",
+    )
+    p.add_argument(
+        "--client-id",
+        default=None,
+        help="OIDC client ID for billing gateway (default: livepeer-sdk).",
+    )
+    p.add_argument(
+        "--browser",
+        action="store_true",
+        default=False,
+        help="Use browser-based PKCE login instead of Device Authorization Flow.",
+    )
+    p.add_argument(
+        "--bearer-token",
+        default=None,
+        metavar="TOKEN",
+        help="Pre-issued bearer token (e.g. a pmth_* PymtHouse gateway session). "
+             "Skips OIDC login and uses the token directly. "
+             "Requires --billing-url to derive signer/discovery URLs, "
+             "or combine with --signer for a fully explicit setup.",
+    )
+    p.add_argument(
+        "--discovery",
+        default=None,
+        help="Discovery endpoint for orchestrators (overrides signer /billing discovery).",
+    )
+    p.add_argument(
         "--model",
         default=DEFAULT_MODEL_ID,
         help=f"Pipeline model to start via /live-video-to-video. Default: {DEFAULT_MODEL_ID}",
@@ -47,12 +78,31 @@ async def main() -> None:
     args = _parse_args()
     frame_interval = 1.0 / max(1e-6, args.fps)
 
+    # Resolve signer credentials: pre-issued token takes priority over OIDC login.
+    signer_url = args.signer
+    signer_headers = None
+    billing_url = args.billing_url
+    client_id = args.client_id
+
+    if args.bearer_token:
+        # Use the pre-issued token directly — no OIDC login needed.
+        # Derive signer/discovery URLs from billing_url (same shape as OIDC path).
+        signer_headers = {"Authorization": f"Bearer {args.bearer_token}"}
+        if billing_url and not signer_url:
+            signer_url = billing_url.rstrip("/") + "/api/signer"
+        billing_url = None  # signer_url is now set; skip OIDC resolve
+
     job = None
     try:
         job = start_lv2v(
             args.orchestrator,
             StartJobRequest(model_id=args.model),
-            signer_url=args.signer,
+            signer_url=signer_url,
+            signer_headers=signer_headers,
+            discovery_url=args.discovery,
+            billing_url=billing_url,
+            client_id=client_id,
+            headless=not args.browser,
         )
 
         print("=== LiveVideoToVideo ===")
