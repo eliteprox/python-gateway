@@ -603,9 +603,15 @@ class SegmentWriter:
             return
         try:
             await asyncio.wait_for(self.queue.put(None), timeout=_SEGMENT_QUEUE_PUT_TIMEOUT_S)
-        # BaseException to also capture cancellation errors, timeout errors, etc
-        except BaseException:
-            _LOG.warning("Trickle segment close suppressed seq=%s", self._seq, exc_info=True)
+        except asyncio.CancelledError:
+            # Cancellation during shutdown / segment rollover is expected; don't
+            # log a stack trace and don't swallow the cancel.
+            _LOG.debug("Trickle segment close cancelled seq=%s", self._seq)
+            raise
+        # BaseException to also capture timeout errors and any other unexpected
+        # close-time failures; logged at warning level without a stack trace.
+        except BaseException as e:
+            _LOG.warning("Trickle segment close suppressed seq=%s (%s)", self._seq, e)
 
     async def __aenter__(self) -> "SegmentWriter":
         return self
