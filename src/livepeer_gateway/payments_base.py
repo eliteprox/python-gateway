@@ -33,14 +33,14 @@ class BasePaymentSession:
         info: lp_rpc_pb2.OrchestratorInfo,
         *,
         signer_headers: Optional[dict[str, str]],
-        payment_type: str,
+        type: str,
         capabilities: Optional[lp_rpc_pb2.Capabilities],
         max_refresh_retries: int = 3,
     ) -> None:
         self._signer_url = signer_url
         self._signer_headers = signer_headers
         self._info = info
-        self._payment_type = payment_type
+        self._payment_type = type
         self._manifest_id: Optional[str] = None
         self._capabilities = capabilities
         self._max_refresh_retries = max(0, int(max_refresh_retries))

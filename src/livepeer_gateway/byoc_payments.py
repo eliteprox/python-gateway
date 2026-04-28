@@ -48,7 +48,7 @@ class BYOCPaymentSession(BasePaymentSession):
             signer_url,
             info,
             signer_headers=signer_headers,
-            payment_type="byoc",
+            type="byoc",
             capabilities=capabilities,
             max_refresh_retries=max_refresh_retries,
         )
