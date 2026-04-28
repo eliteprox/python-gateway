@@ -608,9 +608,11 @@ class SegmentWriter:
             # log a stack trace and don't swallow the cancel.
             _LOG.debug("Trickle segment close cancelled seq=%s", self._seq)
             raise
-        # BaseException to also capture timeout errors and any other unexpected
-        # close-time failures; logged at warning level without a stack trace.
-        except BaseException as e:
+        # Capture timeout errors and any other unexpected close-time failures;
+        # logged at warning level without a stack trace. KeyboardInterrupt /
+        # SystemExit are intentionally not caught so process-control exceptions
+        # still propagate.
+        except Exception as e:
             _LOG.warning("Trickle segment close suppressed seq=%s (%s)", self._seq, e)
 
     async def __aenter__(self) -> "SegmentWriter":

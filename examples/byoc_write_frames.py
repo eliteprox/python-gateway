@@ -6,7 +6,7 @@ import av
 
 from livepeer_gateway.byoc import BYOCJobRequest, start_byoc_job
 from livepeer_gateway.errors import LivepeerGatewayError
-from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.media_publish import MediaPublishConfig, VideoOutputConfig
 
 
 DEFAULT_CAPABILITY = "text-reversal"
@@ -80,7 +80,9 @@ async def main() -> None:
         print("publish_url:", job.publish_url)
         print()
 
-        media = job.start_media(MediaPublishConfig(fps=args.fps))
+        media = job.start_media(
+            MediaPublishConfig(tracks=[VideoOutputConfig(fps=args.fps)])
+        )
         job.start_payment_sender()
 
         time_base = Fraction(1, int(round(args.fps)))
