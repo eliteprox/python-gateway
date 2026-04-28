@@ -36,6 +36,7 @@ class BYOCPaymentSession(BasePaymentSession):
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         max_refresh_retries: int = 3,
         stream_payment_endpoint: str = "/ai/stream/payment",
+        use_tofu: bool = True,
     ) -> None:
         if not isinstance(capability_name, str) or not capability_name.strip():
             raise PaymentError("capability_name must be a non-empty string")
@@ -51,6 +52,7 @@ class BYOCPaymentSession(BasePaymentSession):
             type="byoc",
             capabilities=capabilities,
             max_refresh_retries=max_refresh_retries,
+            use_tofu=use_tofu,
         )
         # Use capability name as manifest id so balance tracking is shared
         # across requests for the same BYOC capability (matches go-livepeer).
@@ -91,7 +93,7 @@ class BYOCPaymentSession(BasePaymentSession):
                 "capability": capability,
                 "request": request,
                 "parameters": parameters,
-                "timeout_seconds": timeout_seconds,
+                "timeout_seconds": self._timeout_seconds,
                 "signature_format": "v1",
             },
             headers=self._signer_headers,

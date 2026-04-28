@@ -117,6 +117,7 @@ def _get_payment_orch_info(
     signer_headers: Optional[dict[str, str]],
     capabilities: Any,
     capability_name: str,
+    use_tofu: bool = True,
 ) -> tuple[Any, Any]:
     """
     Fetch OrchestratorInfo for BYOC payment preflight. If the capability-scoped
@@ -129,6 +130,7 @@ def _get_payment_orch_info(
         signer_url=signer_url,
         signer_headers=signer_headers,
         capabilities=capabilities,
+        use_tofu=use_tofu,
     )
     if _orch_info_supports_byoc_payment(payment_info, capability_name):
         return payment_info, capabilities
@@ -137,6 +139,7 @@ def _get_payment_orch_info(
         orch_url,
         signer_url=signer_url,
         signer_headers=signer_headers,
+        use_tofu=use_tofu,
     )
     if _orch_info_supports_byoc_payment(legacy_info, capability_name):
         _LOG.debug(
@@ -525,6 +528,7 @@ def start_byoc_job(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    use_tofu: bool = True,
 ) -> BYOCJob:
     """
     Start a BYOC job through the Python gateway.
@@ -567,6 +571,7 @@ def start_byoc_job(
         discovery_url=resolved_discovery_url,
         discovery_headers=resolved_discovery_headers,
         capabilities=capabilities,
+        use_tofu=use_tofu,
     )
 
     start_rejections: list[OrchestratorRejection] = []
@@ -589,6 +594,7 @@ def start_byoc_job(
                 signer_headers=resolved_signer_headers,
                 capabilities=capabilities,
                 capability_name=req.capability.strip(),
+                use_tofu=use_tofu,
             )
 
             session = BYOCPaymentSession(
@@ -598,6 +604,7 @@ def start_byoc_job(
                 signer_headers=resolved_signer_headers,
                 capabilities=payment_capabilities,
                 stream_payment_endpoint=req.stream_payment_endpoint,
+                use_tofu=use_tofu,
             )
 
             job_id = req._job_id()

@@ -356,7 +356,8 @@ class TricklePublisher:
                 _LOG.debug("Trickle resolved seq from %s: %s", url, resolved_seq)
                 return resolved_seq
             else:
-                _LOG.warning("Trickle /next missing Lp-Trickle-Latest header")
+                # Common on first /next before orchestrator sets the header.
+                _LOG.debug("Trickle /next missing Lp-Trickle-Latest header")
         except Exception:
             _LOG.warning("Trickle /next request failed", exc_info=True)
         return -1
@@ -613,7 +614,8 @@ class SegmentWriter:
         # SystemExit are intentionally not caught so process-control exceptions
         # still propagate.
         except Exception as e:
-            _LOG.warning("Trickle segment close suppressed seq=%s (%s)", self._seq, e)
+            log_fn = _LOG.debug if self._seq == 0 else _LOG.warning
+            log_fn("Trickle segment close suppressed seq=%s (%s)", self._seq, e)
 
     async def __aenter__(self) -> "SegmentWriter":
         return self

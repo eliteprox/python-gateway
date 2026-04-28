@@ -950,7 +950,12 @@ class MediaPublish:
                         # NB: This intentionally keeps trickle rolling
                         # accommodate long stalls / inactivity from the
                         # PyAV end, eg during model loading
-                        _LOG.warning(
+                        log_fn = (
+                            _LOG.debug
+                            if segment_seq == 0
+                            else _LOG.warning
+                        )
+                        log_fn(
                             "MediaPublish[%s] trickle segment seq=%s idle for "
                             "%.1fs; rolling over to a fresh empty segment",
                             self._channel_name,
@@ -993,7 +998,12 @@ class MediaPublish:
                         # orchestrator not draining the trickle POST body. The full
                         # CancelledError -> TimeoutError -> TrickleSegmentWriteError
                         # chain is noise and obscures the actual cause.
-                        _LOG.warning(
+                        log_fn = (
+                            _LOG.debug
+                            if segment_seq == 0
+                            else _LOG.warning
+                        )
+                        log_fn(
                             "MediaPublish[%s] dropped segment seq=%s mid-stream; "
                             "draining pipe until wall-clock segment ends (%s)",
                             self._channel_name,

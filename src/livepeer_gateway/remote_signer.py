@@ -174,8 +174,8 @@ class PaymentSession(BasePaymentSession):
             type=type,
             capabilities=capabilities,
             max_refresh_retries=max_refresh_retries,
+            use_tofu=use_tofu,
         )
-        self._use_tofu = use_tofu
 
     def _offchain_payment(self) -> GetPaymentResponse:
         seg = lp_rpc_pb2.SegData()

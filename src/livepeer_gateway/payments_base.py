@@ -36,6 +36,7 @@ class BasePaymentSession:
         type: str,
         capabilities: Optional[lp_rpc_pb2.Capabilities],
         max_refresh_retries: int = 3,
+        use_tofu: bool = True,
     ) -> None:
         self._signer_url = signer_url
         self._signer_headers = signer_headers
@@ -46,6 +47,7 @@ class BasePaymentSession:
         self._max_refresh_retries = max(0, int(max_refresh_retries))
         self._state: Optional[dict[str, Any]] = None
         self._timeout_seconds: int = 0
+        self._use_tofu = use_tofu
 
     def set_manifest_id(self, manifest_id: str) -> None:
         if not isinstance(manifest_id, str) or not manifest_id.strip():
@@ -91,6 +93,7 @@ class BasePaymentSession:
             signer_url=self._signer_url,
             signer_headers=self._signer_headers,
             capabilities=self._capabilities,
+            use_tofu=self._use_tofu,
         )
 
     def _request_payment(self) -> GetPaymentResponse:
