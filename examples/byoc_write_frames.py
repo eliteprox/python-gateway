@@ -85,7 +85,7 @@ async def main() -> None:
         )
         job.start_payment_sender()
 
-        time_base = Fraction(1, int(round(args.fps)))
+        time_base = Fraction(1, max(1, int(round(args.fps))))
         for i in range(max(0, args.count)):
             color = (i * 5) % 255
             frame = _solid_rgb_frame(args.width, args.height, (color, 0, 255 - color))
