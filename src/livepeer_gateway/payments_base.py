@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from . import lp_rpc_pb2
 from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired
+from .payment_metadata import PaymentAttributionMetadata
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class BasePaymentSession:
         capabilities: Optional[lp_rpc_pb2.Capabilities],
         max_refresh_retries: int = 3,
         use_tofu: bool = True,
+        attribution: Optional[PaymentAttributionMetadata] = None,
     ) -> None:
         self._signer_url = signer_url
         self._signer_headers = signer_headers
@@ -48,6 +50,7 @@ class BasePaymentSession:
         self._state: Optional[dict[str, Any]] = None
         self._timeout_seconds: int = 0
         self._use_tofu = use_tofu
+        self._attribution = attribution
 
     def set_manifest_id(self, manifest_id: str) -> None:
         if not isinstance(manifest_id, str) or not manifest_id.strip():
@@ -80,6 +83,10 @@ class BasePaymentSession:
             payload["capabilities"] = caps_b64
         # One id per billing call so clearinghouse usage is not deduped across an entire manifest.
         payload.setdefault("RequestID", str(uuid.uuid4()))
+        # Embed attribution metadata when provided so PymtHouse can attribute
+        # usage to the specific pipeline/model without remote-signer changes.
+        if self._attribution is not None:
+            payload.update(self._attribution.to_payload_fields())
         return payload
 
     def _refresh_orchestrator_info(self) -> None:

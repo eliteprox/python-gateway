@@ -1,4 +1,11 @@
 from .byoc import BYOCJob, BYOCJobRequest, start_byoc_job
+from .payment_metadata import (
+    ATTRIBUTION_SOURCE_DIRECT_API,
+    ATTRIBUTION_SOURCE_PYMTHOUSE_GATEWAY,
+    ATTRIBUTION_SOURCE_PYTHON_GATEWAY,
+    PAYMENT_METADATA_VERSION,
+    PaymentAttributionMetadata,
+)
 from .byoc_payments import BYOCPaymentSession
 from .capabilities import CapabilityId, build_capabilities
 from .channel_reader import ChannelReader, JSONLReader
@@ -46,6 +53,9 @@ from .segment_reader import SegmentReader, SegmentReaderStats
 from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 
 __all__ = [
+    "ATTRIBUTION_SOURCE_DIRECT_API",
+    "ATTRIBUTION_SOURCE_PYMTHOUSE_GATEWAY",
+    "ATTRIBUTION_SOURCE_PYTHON_GATEWAY",
     "BYOCJob",
     "BYOCJobRequest",
     "BYOCPaymentSession",
@@ -80,6 +90,8 @@ __all__ = [
     "JSONLWriter",
     "Events",
     "PaymentSession",
+    "PAYMENT_METADATA_VERSION",
+    "PaymentAttributionMetadata",
     "parse_token",
     "SelectionCursor",
     "orchestrator_selector",

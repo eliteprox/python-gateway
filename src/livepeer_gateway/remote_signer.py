@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 
 from . import lp_rpc_pb2
 from .errors import LivepeerGatewayError, PaymentError
+from .payment_metadata import PaymentAttributionMetadata
 from .payments_base import BasePaymentSession, GetPaymentResponse
 
 _LOG = logging.getLogger(__name__)
@@ -166,6 +167,7 @@ class PaymentSession(BasePaymentSession):
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         use_tofu: bool = True,
         max_refresh_retries: int = 3,
+        attribution: Optional[PaymentAttributionMetadata] = None,
     ) -> None:
         super().__init__(
             signer_url,
@@ -175,6 +177,7 @@ class PaymentSession(BasePaymentSession):
             capabilities=capabilities,
             max_refresh_retries=max_refresh_retries,
             use_tofu=use_tofu,
+            attribution=attribution,
         )
 
     def _offchain_payment(self) -> GetPaymentResponse:
