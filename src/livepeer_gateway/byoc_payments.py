@@ -26,7 +26,7 @@ class BYOCPaymentSession:
     - Signs job credentials via the remote signer's ``POST /sign-byoc-job``
       endpoint (V1 binary signing format, server-side flatten).
     - Generates time-based BYOC payments via ``/generate-live-payment``
-      using the BYOC capability name as the payment ``type``.
+      using ``type=byoc`` plus the BYOC capability constraint.
     - Sends recurring stream payments to the orchestrator's
       ``/ai/stream/payment`` endpoint (or operator override).
     """
@@ -66,7 +66,7 @@ class BYOCPaymentSession:
         pb = self._info.SerializeToString()
         payload: dict[str, Any] = {
             "orchestrator": base64.b64encode(pb).decode("ascii"),
-            "type": self._capability_name,
+            "type": "byoc",
             "RequestID": str(uuid.uuid4()),
         }
         if self._timeout_seconds > 0:

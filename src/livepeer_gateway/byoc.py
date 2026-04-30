@@ -146,7 +146,7 @@ def _get_payment_orch_info(
             "BYOC payment preflight: using legacy orch info response for %s",
             capability_name,
         )
-        return legacy_info, None
+        return legacy_info, capabilities
 
     return payment_info, capabilities
 
