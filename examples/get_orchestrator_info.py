@@ -38,7 +38,8 @@ def _parse_args() -> argparse.Namespace:
             "\n"
             "  # Request specific capabilities (e.g. BYOC)\n"
             "  python examples/get_orchestrator_info.py localhost:8935 --signer https://signer.example.com --caps byoc/text-reversal\n"
-            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop byoc/my-pipeline\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop,byoc/my-pipeline\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop --caps byoc/my-pipeline\n"
             "\n"
             "  # JSON / JSONL output\n"
             "  python examples/get_orchestrator_info.py localhost:8935 --format json\n"
@@ -73,10 +74,13 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--caps",
-        nargs="*",
+        action="append",
         default=None,
         metavar="PIPELINE/MODEL",
-        help="Request specific capabilities in pipeline/model form (e.g. byoc/text-reversal).",
+        help=(
+            "Request specific capabilities in pipeline/model form. "
+            "Can be comma-delimited or repeated (e.g. --caps byoc/text-reversal --caps live-video-to-video/noop)."
+        ),
     )
     p.add_argument(
         "--format",
@@ -362,17 +366,31 @@ def _resolve_discovery_args(args: argparse.Namespace) -> tuple[Any, str | None, 
     return orchestrators, signer, signer_headers, discovery, discovery_headers
 
 
+def _split_capability_queries(raw_caps: list[str] | None) -> list[str]:
+    if not raw_caps:
+        return []
+    queries: list[str] = []
+    for raw_cap in raw_caps:
+        queries.extend(
+            part.strip()
+            for part in raw_cap.split(",")
+            if part.strip()
+        )
+    return queries
+
+
 def main() -> None:
     args = _parse_args()
 
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
-    if args.caps:
-        capabilities = build_capabilities_from_queries(args.caps)
+    cap_queries = _split_capability_queries(args.caps)
+    if cap_queries:
+        capabilities = build_capabilities_from_queries(cap_queries)
         if not capabilities:
             print(
-                f"ERROR: --caps {args.caps!r} did not parse into any valid capabilities "
+                f"ERROR: --caps {cap_queries!r} did not parse into any valid capabilities "
                 f"(expected pipeline-id/model entries, e.g. 'byoc/text-reversal').",
                 file=sys.stderr,
             )
