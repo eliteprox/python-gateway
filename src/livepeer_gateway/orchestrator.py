@@ -203,6 +203,47 @@ def _http_origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _join_signer_endpoint(signer_url: str, path: str) -> str:
+    """
+    Join an endpoint path onto signer_url while preserving any existing base path.
+
+    Examples:
+    - https://example.com/api/signer + /sign-orchestrator-info
+      -> https://example.com/api/signer/sign-orchestrator-info
+    - https://example.com/api/signer/sign-orchestrator-info + same path
+      -> unchanged
+    """
+    if not isinstance(signer_url, str) or not signer_url.strip():
+        raise ValueError("signer_url must be a non-empty string")
+    parsed = _parse_http_url(signer_url, context="signer_url")
+    base_path = (parsed.path or "").rstrip("/")
+    base = urlunparse(parsed._replace(path=base_path, params="", query="", fragment=""))
+    suffix = path if path.startswith("/") else f"/{path}"
+    if base.endswith(suffix):
+        return base
+    return f"{base}{suffix}"
+
+
+def resolve_transcoder_http_url(origin: str, path_or_absolute_url: str) -> str:
+    """
+    Build the final HTTP URL for a BYOC (or similar) call rooted at an orchestrator
+    transcoder origin, or pass through an absolute URL.
+
+    When ``path_or_absolute_url`` starts with ``http://`` or ``https://``, it is
+    returned unchanged. Otherwise it is treated as a path on ``origin``.
+    """
+    o = path_or_absolute_url.strip()
+    if not o:
+        raise ValueError("path_or_absolute_url must be non-empty")
+    low = o.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return o
+    if not o.startswith("/"):
+        o = "/" + o
+    base = _http_origin(origin)
+    return f"{base}{o}"
+
+
 def _append_caps(url: str, capabilities: Optional[lp_rpc_pb2.Capabilities]) -> str:
     """
     Append repeated `caps` query parameters to a URL.
