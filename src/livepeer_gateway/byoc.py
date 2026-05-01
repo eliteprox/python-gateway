@@ -106,8 +106,32 @@ def _orch_info_has_byoc_price(info: Any, capability_name: str) -> bool:
     return False
 
 
+def _orch_info_aggregate_price_usable(info: Any) -> bool:
+    """
+    True when top-level price_info has a non-zero per-pixel quote.
+
+    go-livepeer omits ``capabilities_prices`` on GetOrchestrator responses built
+    via ``orchestratorInfoWithCaps`` (non-nil request capabilities). The effective
+    job price is only the aggregate ``price_info`` without BYOC capability /
+    constraint fields — see ``PriceInfoForCaps`` vs ``GetCapabilitiesPrices``.
+    """
+    top = _field_value(info, "price_info", "priceInfo")
+    if top is None:
+        return False
+    return _nonzero_real_scalar(
+        _field_value(top, "price_per_unit", "pricePerUnit")
+    ) and _nonzero_real_scalar(
+        _field_value(top, "pixels_per_unit", "pixelsPerUnit")
+    )
+
+
 def _orch_info_supports_byoc_payment(info: Any, capability_name: str) -> bool:
-    return _orch_info_ticket_params_usable(info) and _orch_info_has_byoc_price(info, capability_name)
+    if not _orch_info_ticket_params_usable(info):
+        return False
+    if _orch_info_has_byoc_price(info, capability_name):
+        return True
+    # Capped-path OrchestratorInfo: aggregate price only, no BYOC-tagged rows.
+    return _orch_info_aggregate_price_usable(info)
 
 
 def _get_payment_orch_info(
@@ -120,10 +144,16 @@ def _get_payment_orch_info(
     use_tofu: bool = True,
 ) -> tuple[Any, Any]:
     """
-    Fetch OrchestratorInfo for BYOC payment preflight. If the capability-scoped
-    request comes back without usable BYOC pricing, retry without capability
-    filtering (some legacy orchestrators only advertise BYOC pricing on the
-    unfiltered path).
+    Fetch OrchestratorInfo for BYOC payment preflight.
+
+    First calls ``GetOrchestrator`` with BYOC capability constraints. go-livepeer
+    then returns aggregate ``price_info`` and often omits ``capabilities_prices``
+    (see ``orchestratorInfoWithCaps``); that shape is accepted without a second
+    RPC.
+
+    If that response still fails preflight, retries once **without** capability
+    constraints for legacy orchestrators that only surface BYOC pricing on the
+    unfiltered path.
     """
     payment_info = _get_orch_info(
         orch_url,

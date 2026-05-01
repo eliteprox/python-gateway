@@ -57,20 +57,24 @@ class BYOCPaymentSession:
         self._state: Optional[dict[str, Any]] = None
         self._stream_payment_endpoint = stream_payment_endpoint.strip()
         self._timeout_seconds: int = 0
+        self._manifest_id: Optional[str] = None
         self._use_tofu = use_tofu
 
     def set_timeout_seconds(self, timeout_seconds: int) -> None:
         self._timeout_seconds = max(0, int(timeout_seconds))
 
     def _build_payment_payload(self) -> dict[str, Any]:
+        if not self._manifest_id:
+            raise PaymentError("BYOC payment requires a signed job_id before requesting payment")
         pb = self._info.SerializeToString()
         payload: dict[str, Any] = {
             "orchestrator": base64.b64encode(pb).decode("ascii"),
             "type": "byoc",
             "RequestID": str(uuid.uuid4()),
+            "manifestID": self._manifest_id,
         }
         if self._timeout_seconds > 0:
-            payload["timeoutSeconds"] = self._timeout_seconds
+            payload["preloadSeconds"] = self._timeout_seconds
         if self._state is not None:
             payload["state"] = self._state
         if self._capabilities is not None:
@@ -176,8 +180,11 @@ class BYOCPaymentSession:
             raise PaymentError("request must be a JSON string")
         if not isinstance(parameters, str):
             raise PaymentError("parameters must be a JSON string")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise PaymentError("job_id must be a non-empty string")
 
         self.set_timeout_seconds(timeout_seconds)
+        self._manifest_id = job_id.strip()
 
         from .orchestrator import _join_signer_endpoint, post_json
 
