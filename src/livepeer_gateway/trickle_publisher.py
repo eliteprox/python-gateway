@@ -583,7 +583,8 @@ class SegmentWriter:
         try:
             # This bounds local backpressure while feeding the request body; it does
             # not bound the total lifetime of the HTTP POST once the body is drained.
-            await asyncio.wait_for(self.queue.put(data), timeout=_SEGMENT_QUEUE_PUT_TIMEOUT_S)
+            async with asyncio.timeout(_SEGMENT_QUEUE_PUT_TIMEOUT_S):
+                await self.queue.put(data)
             if self._on_write_bytes is not None:
                 self._on_write_bytes(len(data))
         except asyncio.TimeoutError as e:
@@ -603,7 +604,8 @@ class SegmentWriter:
         if self._seg_state.error is not None:
             return
         try:
-            await asyncio.wait_for(self.queue.put(None), timeout=_SEGMENT_QUEUE_PUT_TIMEOUT_S)
+            async with asyncio.timeout(_SEGMENT_QUEUE_PUT_TIMEOUT_S):
+                await self.queue.put(None)
         except asyncio.CancelledError:
             # Cancellation during shutdown / segment rollover is expected; don't
             # log a stack trace and don't swallow the cancel.
