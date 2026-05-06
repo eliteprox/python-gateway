@@ -1,9 +1,11 @@
 import argparse
 import json
 import logging
+import sys
 from typing import Any
 
 from livepeer_gateway.capabilities import (
+    build_capabilities_from_queries,
     compute_available,
     format_capability,
     get_capacity_in_use,
@@ -33,6 +35,11 @@ def _parse_args() -> argparse.Namespace:
             "\n"
             "  # Signer URL\n"
             "  python examples/get_orchestrator_info.py --signer https://signer.example.com\n"
+            "\n"
+            "  # Request specific capabilities (e.g. BYOC)\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --signer https://signer.example.com --caps byoc/text-reversal\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop,byoc/my-pipeline\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --caps live-video-to-video/noop --caps byoc/my-pipeline\n"
             "\n"
             "  # JSON / JSONL output\n"
             "  python examples/get_orchestrator_info.py localhost:8935 --format json\n"
@@ -64,6 +71,16 @@ def _parse_args() -> argparse.Namespace:
         "--debug",
         action="store_true",
         help="Enable debug logging for discovery diagnostics.",
+    )
+    p.add_argument(
+        "--caps",
+        action="append",
+        default=None,
+        metavar="PIPELINE/MODEL",
+        help=(
+            "Request specific capabilities in pipeline/model form. "
+            "Can be comma-delimited or repeated (e.g. --caps byoc/text-reversal --caps live-video-to-video/noop)."
+        ),
     )
     p.add_argument(
         "--format",
@@ -349,11 +366,37 @@ def _resolve_discovery_args(args: argparse.Namespace) -> tuple[Any, str | None, 
     return orchestrators, signer, signer_headers, discovery, discovery_headers
 
 
+def _split_capability_queries(raw_caps: list[str] | None) -> list[str]:
+    if not raw_caps:
+        return []
+    queries: list[str] = []
+    for raw_cap in raw_caps:
+        queries.extend(
+            part.strip()
+            for part in raw_cap.split(",")
+            if part.strip()
+        )
+    return queries
+
+
 def main() -> None:
     args = _parse_args()
 
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
+
+    cap_queries = _split_capability_queries(args.caps)
+    if cap_queries:
+        capabilities = build_capabilities_from_queries(cap_queries)
+        if not capabilities:
+            print(
+                f"ERROR: --caps {cap_queries!r} did not parse into any valid capabilities "
+                f"(expected pipeline-id/model entries, e.g. 'byoc/text-reversal').",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        capabilities = None
 
     json_results: list[dict[str, Any]] = []
 
@@ -384,6 +427,7 @@ def main() -> None:
             signer_headers=signer_headers,
             discovery_url=discovery,
             discovery_headers=discovery_headers,
+            capabilities=capabilities,
         )
 
         for orch_url in orch_list:
@@ -392,6 +436,7 @@ def main() -> None:
                     orch_url,
                     signer_url=signer,
                     signer_headers=signer_headers,
+                    capabilities=capabilities,
                 )
             except LivepeerGatewayError as e:
                 print_error(orch_url, e)

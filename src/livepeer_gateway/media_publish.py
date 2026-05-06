@@ -950,7 +950,12 @@ class MediaPublish:
                         # NB: This intentionally keeps trickle rolling
                         # accommodate long stalls / inactivity from the
                         # PyAV end, eg during model loading
-                        _LOG.warning(
+                        log_fn = (
+                            _LOG.debug
+                            if segment_seq == 0
+                            else _LOG.warning
+                        )
+                        log_fn(
                             "MediaPublish[%s] trickle segment seq=%s idle for "
                             "%.1fs; rolling over to a fresh empty segment",
                             self._channel_name,
@@ -986,15 +991,24 @@ class MediaPublish:
                     # lean on that instead of doing that here.
                     try:
                         await segment.write(chunk)
-                    except TrickleSegmentWriteError:
+                    except TrickleSegmentWriteError as e:
                         self._active_segment_drain = True
                         self._stats["segments_failed"] += 1
-                        _LOG.warning(
+                        # Single-line warning: write timeouts here are caused by the
+                        # orchestrator not draining the trickle POST body. The full
+                        # CancelledError -> TimeoutError -> TrickleSegmentWriteError
+                        # chain is noise and obscures the actual cause.
+                        log_fn = (
+                            _LOG.debug
+                            if segment_seq == 0
+                            else _LOG.warning
+                        )
+                        log_fn(
                             "MediaPublish[%s] dropped segment seq=%s mid-stream; "
-                            "draining pipe until wall-clock segment ends",
+                            "draining pipe until wall-clock segment ends (%s)",
                             self._channel_name,
                             segment_seq,
-                            exc_info=True,
+                            e,
                         )
                 if self._should_close_segment_after_loop():
                     await self._close_active_segment_locked(
