@@ -78,20 +78,19 @@ def get_orch_info_sig(
     Fetch signer material exactly once per (signer_url, headers) combination
     for the lifetime of the process. Subsequent calls return cached data.
     """
-    from .orchestrator import _extract_error_message, _http_origin, post_json
+    from .orchestrator import _extract_error_message, _join_signer_endpoint, post_json
 
     # check for offchain mode
     if not signer_url:
         return SignerMaterial(address=None, sig=None)
 
-    # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
-    # Normalize to an https:// origin and append the expected path.
-    signer_url = f"{_http_origin(signer_url)}/sign-orchestrator-info"
+    # Preserve base path on billing gateways (e.g. .../api/signer/sign-orchestrator-info).
+    endpoint_url = _join_signer_endpoint(signer_url, "/sign-orchestrator-info")
     headers = dict(_signer_headers) if _signer_headers else None
 
     try:
         # Some signers accept/expect POST with an empty JSON object.
-        data = post_json(signer_url, {}, headers=headers, timeout=5.0)
+        data = post_json(endpoint_url, {}, headers=headers, timeout=5.0)
 
         # Expected response shape (example):
         # {
@@ -100,7 +99,7 @@ def get_orch_info_sig(
         # }
         if "address" not in data or "signature" not in data:
             raise RemoteSignerError(
-                signer_url,
+                endpoint_url,
                 f"Remote signer JSON must contain 'address' and 'signature': {data!r}",
                 cause=None,
             ) from None
@@ -117,34 +116,34 @@ def get_orch_info_sig(
             body = _extract_error_message(cause)
             body_part = f"; body={body!r}" if body else ""
             raise RemoteSignerError(
-                signer_url,
+                endpoint_url,
                 f"HTTP {cause.code} from signer{body_part}",
                 cause=cause,
             ) from None
 
         if isinstance(cause, ConnectionRefusedError):
             raise RemoteSignerError(
-                signer_url,
+                endpoint_url,
                 "connection refused (is the signer running? is the host/port correct?)",
                 cause=cause,
             ) from None
 
         if isinstance(cause, URLError):
             raise RemoteSignerError(
-                signer_url,
+                endpoint_url,
                 f"failed to reach signer: {getattr(cause, 'reason', cause)}",
                 cause=cause,
             ) from None
 
         if isinstance(cause, json.JSONDecodeError):
             raise RemoteSignerError(
-                signer_url,
+                endpoint_url,
                 f"signer did not return valid JSON: {cause}",
                 cause=cause,
             ) from None
 
         raise RemoteSignerError(
-            signer_url,
+            endpoint_url,
             f"unexpected error: {cause.__class__.__name__}: {cause}",
             cause=cause if isinstance(cause, BaseException) else e,
         ) from None
@@ -201,10 +200,9 @@ class PaymentSession:
             return GetPaymentResponse(seg_creds=seg, payment="")
 
         def _payment_request() -> GetPaymentResponse:
-            from .orchestrator import _http_origin, post_json
+            from .orchestrator import _join_signer_endpoint, post_json
 
-            base = _http_origin(self._signer_url)
-            url = f"{base}/generate-live-payment"
+            url = _join_signer_endpoint(self._signer_url, "/generate-live-payment")
 
             pb = self._info.SerializeToString()
             orch_b64 = base64.b64encode(pb).decode("ascii")
@@ -212,6 +210,10 @@ class PaymentSession:
                 "orchestrator": orch_b64,
                 "type": self._type,
             }
+            if self._capabilities is not None:
+                payload["capabilities"] = base64.b64encode(
+                    self._capabilities.SerializeToString()
+                ).decode("ascii")
             if self._manifest_id is not None:
                 payload["ManifestID"] = self._manifest_id
             if self._state is not None:

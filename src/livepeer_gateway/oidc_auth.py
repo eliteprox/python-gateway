@@ -3,6 +3,9 @@ OAuth 2.0 Authorization Code Flow with PKCE for native/desktop applications,
 and Device Authorization Flow (RFC 8628) for CLI/IoT/headless environments.
 
 Uses authlib's OAuth2Client for OAuth client behavior and HTTP transport.
+TLS verification is disabled for ``https`` on loopback / private / ``*.local``
+hosts (and when ``LIVEPEER_ALLOW_INSECURE_TLS`` is set), matching signer HTTP
+behavior so local PymtHouse with self-signed certs still runs OIDC discovery.
 All token requests include a ``resource`` parameter (RFC 8707) so the
 provider issues audience-bound JWT access tokens.
 
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import http.server
+import ipaddress
 import json
 import logging
 import os
@@ -33,7 +37,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from authlib.common.security import generate_token
 from authlib.integrations.httpx_client import OAuth2Client
@@ -76,7 +80,46 @@ class OIDCConfig:
 
 
 def _oauth_verify() -> bool:
+    """Legacy: verify TLS unless LIVEPEER_ALLOW_INSECURE_TLS is set."""
     return not bool(os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS"))
+
+
+def _is_dev_or_private_hostname(hostname: str | None) -> bool:
+    """
+    Hosts where we skip TLS certificate verification for OIDC HTTP (same policy
+    as urllib-based signer/orchestrator JSON in ``orchestrator.request_json``).
+    """
+    if not hostname:
+        return False
+    h = hostname.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    h = h.split("%", 1)[0]
+    if h in ("localhost",) or h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+    except ValueError:
+        return False
+
+
+def _httpx_verify_tls_for_base_url(base_url: str) -> bool:
+    """
+    Whether httpx should verify TLS for requests to this billing / OIDC base URL.
+
+    False when LIVEPEER_ALLOW_INSECURE_TLS is set, or when the URL is https and
+    the host is loopback / RFC1918 / link-local / *.local (typical dev PymtHouse).
+    """
+    if os.environ.get("LIVEPEER_ALLOW_INSECURE_TLS", "").strip():
+        return False
+    try:
+        parsed = urlparse(base_url)
+    except Exception:
+        return True
+    if parsed.scheme != "https":
+        return True
+    return not _is_dev_or_private_hostname(parsed.hostname)
 
 
 def _build_oauth2_client(
@@ -86,7 +129,12 @@ def _build_oauth2_client(
     redirect_uri: Optional[str] = None,
     token: Optional[dict[str, Any]] = None,
     code_challenge_method: Optional[str] = None,
+    tls_context_url: Optional[str] = None,
 ) -> OAuth2Client:
+    if tls_context_url is not None:
+        verify = _httpx_verify_tls_for_base_url(tls_context_url)
+    else:
+        verify = _oauth_verify()
     return OAuth2Client(
         client_id=client_id,
         scope=scopes,
@@ -95,7 +143,7 @@ def _build_oauth2_client(
         token_endpoint_auth_method="none",
         code_challenge_method=code_challenge_method,
         timeout=15.0,
-        verify=_oauth_verify(),
+        verify=verify,
         headers={"Accept": "application/json"},
     )
 
@@ -104,10 +152,90 @@ def _build_oauth2_client(
 # OIDC discovery
 # ---------------------------------------------------------------------------
 
+
+def _is_loopback_hostname_for_http_fallback(hostname: str | None) -> bool:
+    """Whether we may retry OIDC discovery over plain HTTP (same host/port)."""
+    if not hostname:
+        return False
+    h = hostname.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    h = h.split("%", 1)[0]
+    return h in ("localhost", "127.0.0.1", "::1")
+
+
+def _oidc_billing_base_url_candidates(base_url: str) -> list[str]:
+    """Ordered origins to try for ``/.well-known/openid-configuration``."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(u: str) -> None:
+        u = u.rstrip("/")
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+
+    b = base_url.strip().rstrip("/")
+    add(b)
+    try:
+        p = urlparse(b)
+        if (
+            p.scheme == "https"
+            and p.hostname
+            and _is_loopback_hostname_for_http_fallback(p.hostname)
+        ):
+            add(urlunparse(p._replace(scheme="http")))
+    except Exception:
+        pass
+    return out
+
+
+def resolve_oidc_billing_base_url(base_url: str) -> Optional[str]:
+    """
+    If ``base_url`` serves OIDC discovery, return the base origin to use for
+    token and signer API paths (``{base}/api/signer``).
+
+    Tries ``https`` first, then for loopback hosts an ``http`` variant so local
+    Next.js (HTTP-only) still works when the user passes ``https://localhost:…``.
+    """
+    candidates = _oidc_billing_base_url_candidates(base_url)
+    errors: list[str] = []
+    for cand in candidates:
+        disc = cand.rstrip("/") + "/.well-known/openid-configuration"
+        try:
+            with _build_oauth2_client(tls_context_url=cand) as client:
+                resp = client.request("GET", disc, withhold_token=True, timeout=5.0)
+            if resp.status_code == 200:
+                if cand.rstrip("/") != base_url.rstrip("/"):
+                    _LOG.info(
+                        "Using %s for OIDC (discovery over https failed or is unavailable; "
+                        "loopback billing URL was %s)",
+                        cand.rstrip("/"),
+                        base_url.rstrip("/"),
+                    )
+                return cand.rstrip("/")
+            errors.append(f"{cand}: HTTP {resp.status_code} from {disc}")
+        except Exception as exc:
+            errors.append(f"{cand}: {exc!r}")
+            _LOG.debug("OIDC discovery GET %s failed", disc, exc_info=True)
+    _LOG.warning(
+        "OIDC discovery failed for billing URL %r (tried %s). %s",
+        base_url,
+        candidates,
+        " | ".join(errors) if errors else "no detail",
+    )
+    return None
+
+
+def probe_oidc(base_url: str) -> bool:
+    """Return True if the base URL exposes an OIDC discovery endpoint."""
+    return resolve_oidc_billing_base_url(base_url) is not None
+
+
 def discover(base_url: str) -> OIDCConfig:
     """Fetch and parse the OIDC discovery document."""
     url = base_url.rstrip("/") + "/.well-known/openid-configuration"
-    with _build_oauth2_client() as client:
+    with _build_oauth2_client(tls_context_url=base_url) as client:
         resp = client.request("GET", url, withhold_token=True)
     if resp.status_code >= 400:
         raise _OIDCError(f"HTTP {resp.status_code} from {url}: {resp.text}")
@@ -120,17 +248,6 @@ def discover(base_url: str) -> OIDCConfig:
         jwks_uri=data.get("jwks_uri", ""),
         device_authorization_endpoint=data.get("device_authorization_endpoint"),
     )
-
-
-def probe_oidc(base_url: str) -> bool:
-    """Return True if the base URL exposes an OIDC discovery endpoint."""
-    url = base_url.rstrip("/") + "/.well-known/openid-configuration"
-    try:
-        with _build_oauth2_client() as client:
-            resp = client.request("GET", url, withhold_token=True, timeout=5.0)
-            return resp.status_code == 200
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +341,7 @@ def login(
         scopes=scopes,
         redirect_uri=redirect_uri,
         code_challenge_method="S256",
+        tls_context_url=base_url,
     ) as client:
         authorize_url, state = client.create_authorization_url(
             config.authorization_endpoint,
@@ -313,7 +431,7 @@ def device_login(
         )
 
     # Step 1: Request device code (with resource indicator)
-    with _build_oauth2_client(client_id=client_id, scopes=scopes) as client:
+    with _build_oauth2_client(client_id=client_id, scopes=scopes, tls_context_url=base_url) as client:
         resp = client.request(
             "POST",
             config.device_authorization_endpoint,
@@ -363,7 +481,7 @@ def device_login(
     deadline = time.time() + min(expires_in, _DEVICE_POLL_TIMEOUT_S)
     poll_interval = interval
 
-    with _build_oauth2_client(client_id=client_id, scopes=scopes) as client:
+    with _build_oauth2_client(client_id=client_id, scopes=scopes, tls_context_url=base_url) as client:
         while time.time() < deadline:
             time.sleep(poll_interval)
 
@@ -426,6 +544,7 @@ def refresh(
     with _build_oauth2_client(
         client_id=client_id,
         token={"refresh_token": refresh_token},
+        tls_context_url=base_url,
     ) as client:
         try:
             return client.refresh_token(

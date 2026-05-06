@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import logging
+import traceback
 from fractions import Fraction
 
 import av
 
-from livepeer_gateway.errors import LivepeerGatewayError
+from livepeer_gateway.errors import LivepeerGatewayError, NoOrchestratorAvailableError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
 from livepeer_gateway.media_publish import MediaPublishConfig, VideoOutputConfig
 
@@ -31,6 +33,12 @@ def _parse_args() -> argparse.Namespace:
         "Auto-detects OIDC login or direct signer mode.",
     )
     p.add_argument(
+        "--billing-access-token",
+        default=None,
+        metavar="JWT",
+        help="Skip OIDC: Bearer token for the billing gateway signer API (use with --billing-url).",
+    )
+    p.add_argument(
         "--client-id",
         default=None,
         help="OIDC client ID for billing gateway (default: livepeer-sdk).",
@@ -46,7 +54,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="TOKEN",
         help="Base64-encoded JSON token (signer, signer_headers, discovery, orchestrators). "
-        "See README token schema.",
+        "Encode billing URL + JWT: python examples/encode_gateway_token.py --billing-url URL JWT",
     )
     p.add_argument(
         "--discovery",
@@ -62,6 +70,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--height", type=int, default=180, help="Frame height (default: 180).")
     p.add_argument("--fps", type=float, default=30.0, help="Frames per second (default: 30).")
     p.add_argument("--count", type=int, default=90, help="Number of frames to send (default: 90).")
+    p.add_argument(
+        "--debug",
+        "-d",
+        action="store_true",
+        help="Enable DEBUG logs for livepeer_gateway (discovery, orchestrator selection, HTTP).",
+    )
     return p.parse_args()
 
 
@@ -74,6 +88,12 @@ def _solid_rgb_frame(width: int, height: int, rgb: tuple[int, int, int]) -> av.V
 
 async def main() -> None:
     args = _parse_args()
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(levelname)s %(name)s: %(message)s",
+        )
+        logging.getLogger("livepeer_gateway").setLevel(logging.DEBUG)
     frame_interval = 1.0 / max(1e-6, args.fps)
 
     job = None
@@ -85,6 +105,7 @@ async def main() -> None:
             signer_url=args.signer,
             discovery_url=args.discovery,
             billing_url=args.billing_url,
+            billing_access_token=args.billing_access_token,
             client_id=args.client_id,
             headless=not args.browser,
         )
@@ -107,8 +128,21 @@ async def main() -> None:
             frame.time_base = time_base
             await media.write_frame(frame)
             await asyncio.sleep(frame_interval)
+    except NoOrchestratorAvailableError as e:
+        print(f"ERROR: {e}")
+        if e.rejections:
+            print("Per-orchestrator failures:")
+            for r in e.rejections:
+                print(f"  - {r.url}")
+                print(f"    {r.reason}")
     except LivepeerGatewayError as e:
         print(f"ERROR: {e}")
+        if args.debug and e.__cause__:
+            print(f"Cause: {e.__cause__!r}")
+    except Exception:
+        if args.debug:
+            traceback.print_exc()
+        raise
     finally:
         if job is not None:
             await job.close()

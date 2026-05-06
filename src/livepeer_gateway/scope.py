@@ -29,6 +29,7 @@ def start_scope(
     use_tofu: bool = True,
     timeout: float = 5.0,
     billing_url: Optional[str] = None,
+    billing_access_token: Optional[str] = None,
     client_id: Optional[str] = None,
     headless: bool = True,
     on_device_auth: Optional[Any] = None,
@@ -97,11 +98,23 @@ def start_scope(
     if resolved_billing_url is None:
         resolved_billing_url = billing_url
 
+    resolved_billing_access_token = token_data.get("billing_access_token") if token_data else None
+    if resolved_billing_access_token is None:
+        resolved_billing_access_token = billing_access_token
+
+    if resolved_billing_access_token:
+        if not resolved_billing_url:
+            raise LivepeerGatewayError(
+                "billing_access_token requires a billing gateway URL (billing_url or token \"billing\")"
+            )
+
     billing_kwargs: dict[str, Any] = {"headless": headless}
     if client_id is not None:
         billing_kwargs["client_id"] = client_id
     if on_device_auth is not None:
         billing_kwargs["on_device_auth"] = on_device_auth
+    if resolved_billing_access_token is not None:
+        billing_kwargs["billing_access_token"] = resolved_billing_access_token
     resolved_signer_url, resolved_signer_headers, resolved_discovery_url = _resolve_billing(
         resolved_billing_url,
         resolved_signer_url,

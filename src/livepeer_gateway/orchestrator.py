@@ -21,6 +21,36 @@ from .remote_signer import RemoteSignerError
 
 _LOG = logging.getLogger(__name__)
 
+
+def _iter_exception_chain(exc: BaseException) -> list[BaseException]:
+    """Walk __cause__ / __context__ without infinite loops."""
+    out: list[BaseException] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        out.append(cur)
+        nxt = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+        cur = nxt
+    return out
+
+
+def _is_tls_wrong_version_number(exc: BaseException) -> bool:
+    """
+    True when the peer responded with non-TLS bytes (typical: https:// URL but
+    the server only speaks plain HTTP, e.g. Next.js dev on port 3001).
+    """
+    for e in _iter_exception_chain(exc):
+        if "WRONG_VERSION_NUMBER" in str(e).upper():
+            return True
+    return False
+
+
+def _https_to_http_url(url: str) -> str | None:
+    if url.lower().startswith("https://"):
+        return "http://" + url[8:]
+    return None
+
 def _truncate(s: str, max_len: int = 2000) -> str:
     if len(s) <= max_len:
         return s
@@ -76,11 +106,18 @@ def request_json(
     payload: Optional[dict[str, Any]] = None,
     headers: Optional[dict[str, str]] = None,
     timeout: float = 5.0,
+    _scheme_downgraded: bool = False,
 ) -> Any:
     """
     Make a JSON HTTP request and parse the JSON response.
 
     If method is None, defaults to POST when payload is provided, otherwise GET.
+
+    HTTPS uses a context that does **not** verify server certificates (same policy
+    as gRPC orchestrator paths). If the URL is ``https://`` but the server only
+    speaks plain HTTP (TLS handshake fails with ``WRONG_VERSION_NUMBER``), the
+    request is **retried once** as ``http://`` with the same path (common for
+    local billing gateways like Next.js on port 3001).
 
     Raises LivepeerGatewayError on HTTP/network/JSON parsing errors.
     """
@@ -124,6 +161,25 @@ def request_json(
             f"HTTP JSON error: connection refused (is the server running? is the host/port correct?) (url={url})"
         ) from e
     except URLError as e:
+        if (
+            not _scheme_downgraded
+            and _is_tls_wrong_version_number(e)
+            and (http_url := _https_to_http_url(url)) is not None
+        ):
+            _LOG.debug(
+                "request_json: TLS handshake failed with WRONG_VERSION_NUMBER; "
+                "retrying once as plain HTTP (url=%s -> %s)",
+                url,
+                http_url,
+            )
+            return request_json(
+                http_url,
+                method=method,
+                payload=payload,
+                headers=headers,
+                timeout=timeout,
+                _scheme_downgraded=True,
+            )
         raise LivepeerGatewayError(
             f"HTTP JSON error: failed to reach endpoint: {getattr(e, 'reason', e)} (url={url})"
         ) from e
@@ -303,7 +359,7 @@ def discover_orchestrators(
         discovery_endpoint = _parse_http_url(discovery_url).geturl()
         request_headers = discovery_headers
     elif signer_url:
-        discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+        discovery_endpoint = _join_signer_endpoint(signer_url, "/discover-orchestrators")
         request_headers = signer_headers
     else:
         _LOG.debug("discover_orchestrators failed: no discovery inputs")
