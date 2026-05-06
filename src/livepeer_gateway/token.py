@@ -28,10 +28,13 @@ def parse_token(token: str) -> dict[str, Any]:
 
     signer = payload.get("signer")
     discovery = payload.get("discovery")
+    billing = payload.get("billing")
     if signer is not None and not isinstance(signer, str):
         raise LivepeerGatewayError("Invalid token: signer must be a string")
     if discovery is not None and not isinstance(discovery, str):
         raise LivepeerGatewayError("Invalid token: discovery must be a string")
+    if billing is not None and not isinstance(billing, str):
+        raise LivepeerGatewayError("Invalid token: billing must be a string")
 
     signer_headers = payload.get("signer_headers")
     discovery_headers = payload.get("discovery_headers")
@@ -57,6 +60,7 @@ def parse_token(token: str) -> dict[str, Any]:
         "orchestrators": normalized_orchestrators,
         "signer": signer,
         "discovery": discovery,
+        "billing": billing,
         "signer_headers": signer_headers,
         "discovery_headers": discovery_headers,
     }

@@ -6,7 +6,7 @@ from typing import Any, Optional, Sequence
 from .capabilities import CapabilityId, build_capabilities
 from .control import ControlConfig, ControlMode
 from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, OrchestratorRejection
-from .lv2v import LiveVideoToVideo, StartJobRequest
+from .lv2v import LiveVideoToVideo, StartJobRequest, _resolve_billing
 from .orchestrator import _http_origin, post_json
 from .remote_signer import PaymentSession
 from .selection import orchestrator_selector
@@ -28,6 +28,10 @@ def start_scope(
     control_config: Optional[ControlConfig] = None,
     use_tofu: bool = True,
     timeout: float = 5.0,
+    billing_url: Optional[str] = None,
+    client_id: Optional[str] = None,
+    headless: bool = True,
+    on_device_auth: Optional[Any] = None,
 ) -> LiveVideoToVideo:
     """
     Start a scope job.
@@ -89,6 +93,29 @@ def start_scope(
     if resolved_discovery_headers is None:
         resolved_discovery_headers = discovery_headers
 
+    resolved_billing_url = token_data.get("billing") if token_data else None
+    if resolved_billing_url is None:
+        resolved_billing_url = billing_url
+
+    billing_kwargs: dict[str, Any] = {"headless": headless}
+    if client_id is not None:
+        billing_kwargs["client_id"] = client_id
+    if on_device_auth is not None:
+        billing_kwargs["on_device_auth"] = on_device_auth
+    resolved_signer_url, resolved_signer_headers, resolved_discovery_url = _resolve_billing(
+        resolved_billing_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        **billing_kwargs,
+    )
+    if (
+        resolved_discovery_url is not None
+        and resolved_discovery_headers is None
+        and resolved_signer_headers is not None
+    ):
+        resolved_discovery_headers = resolved_signer_headers
+
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, "scope")
     # Orchestrator discovery precedence after token-first field resolution:
     # token orchestrators -> explicit orch_url -> token discovery ->
@@ -128,7 +155,7 @@ def start_scope(
             p = session.get_payment()
             headers: dict[str, str] = {
                 "Livepeer-Payment": p.payment,
-                "Livepeer-Segment": p.seg_creds,
+                "Livepeer-Segment": p.seg_creds or "",
             }
 
             base = _http_origin(info.transcoder)

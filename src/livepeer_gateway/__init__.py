@@ -29,6 +29,15 @@ from .media_decode import (
 from .media_output import MediaOutput, MediaOutputStats
 from .errors import OrchestratorRejection
 from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
+from .oidc_auth import (
+    OAuth2Token,
+    OIDCConfig,
+    clear_all_cached_tokens,
+    device_login as oidc_device_login,
+    ensure_valid_token,
+    login as oidc_login,
+    refresh as oidc_refresh,
+)
 from .orch_info import get_orch_info
 from .orchestrator import discover_orchestrators
 from .remote_signer import PaymentSession
@@ -49,6 +58,7 @@ __all__ = [
     "BYOCJob",
     "BYOCJobRequest",
     "BYOCPaymentSession",
+    "clear_all_cached_tokens",
     "Control",
     "ControlConfig",
     "ControlMode",
@@ -56,10 +66,12 @@ __all__ = [
     "CapabilityId",
     "build_capabilities",
     "discover_orchestrators",
+    "ensure_valid_token",
     "get_orch_info",
     "LiveVideoToVideo",
     "LivepeerGatewayError",
     "NoOrchestratorAvailableError",
+    "OIDCConfig",
     "OrchestratorRejection",
     "PaymentError",
     "PaymentRequiredError",
@@ -79,6 +91,9 @@ __all__ = [
     "JSONLReader",
     "JSONLWriter",
     "Events",
+    "oidc_device_login",
+    "oidc_login",
+    "oidc_refresh",
     "PaymentSession",
     "parse_token",
     "SelectionCursor",
@@ -87,6 +102,7 @@ __all__ = [
     "start_byoc_job",
     "start_lv2v",
     "start_scope",
+    "OAuth2Token",
     "TricklePublishError",
     "TricklePublisher",
     "TricklePublisherStats",

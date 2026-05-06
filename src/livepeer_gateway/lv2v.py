@@ -28,6 +28,48 @@ from .trickle_subscriber import TrickleSubscriber
 _LOG = logging.getLogger(__name__)
 
 
+def _resolve_billing(
+    billing_url: Optional[str],
+    signer_url: Optional[str],
+    signer_headers: Optional[dict[str, str]],
+    discovery_url: Optional[str],
+    *,
+    client_id: str = "livepeer-sdk",
+    scopes: str = "openid profile sign:job",
+    headless: bool = True,
+    on_device_auth: Optional[Any] = None,
+) -> tuple[Optional[str], Optional[dict[str, str]], Optional[str]]:
+    """
+    When billing_url is provided and signer_url is not set, resolve signer
+    credentials automatically. Probes for OIDC discovery to decide between
+    authenticated gateway mode and plain remote signer mode.
+
+    Returns (signer_url, signer_headers, discovery_url), potentially updated.
+    """
+    if not billing_url or signer_url:
+        return signer_url, signer_headers, discovery_url
+
+    from .oidc_auth import ensure_valid_token, probe_oidc
+
+    base = billing_url.rstrip("/")
+
+    if probe_oidc(base):
+        tokens = ensure_valid_token(
+            base,
+            client_id=client_id,
+            scopes=scopes,
+            headless=headless,
+            on_device_auth=on_device_auth,
+        )
+        resolved_signer = f"{base}/api/signer"
+        resolved_headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        resolved_discovery = discovery_url or f"{base}/api/signer/discover-orchestrators"
+        return resolved_signer, resolved_headers, resolved_discovery
+
+    _LOG.info("No OIDC discovery at %s; using as direct signer URL", base)
+    return base, signer_headers, discovery_url
+
+
 @dataclass(frozen=True)
 class StartJobRequest:
     # The ID of the Gateway request (for logging purposes).
@@ -257,6 +299,10 @@ def start_lv2v(
     control_config: Optional[ControlConfig] = None,
     use_tofu: bool = True,
     timeout: float = 5.0,
+    billing_url: Optional[str] = None,
+    client_id: Optional[str] = None,
+    headless: bool = True,
+    on_device_auth: Optional[Any] = None,
 ) -> LiveVideoToVideo:
     """
     Start a live video-to-video job.
@@ -290,6 +336,11 @@ def start_lv2v(
 
     ``control_config`` controls control-channel behavior. Use
     ``ControlConfig(mode=ControlMode.DISABLED)`` to disable keepalives.
+
+    ``billing_url`` may point at a billing gateway that exposes OIDC discovery.
+    When set (and ``signer_url`` is not), resolves signer credentials automatically:
+    OIDC -> ``{billing_url}/api/signer`` with Bearer access token; otherwise treats
+    ``billing_url`` as a direct signer base URL.
     """
     if not req.model_id:
         raise LivepeerGatewayError("start_lv2v requires model_id")
@@ -317,6 +368,29 @@ def start_lv2v(
     resolved_discovery_headers = token_data.get("discovery_headers") if token_data else None
     if resolved_discovery_headers is None:
         resolved_discovery_headers = discovery_headers
+
+    resolved_billing_url = token_data.get("billing") if token_data else None
+    if resolved_billing_url is None:
+        resolved_billing_url = billing_url
+
+    billing_kwargs: dict[str, Any] = {"headless": headless}
+    if client_id is not None:
+        billing_kwargs["client_id"] = client_id
+    if on_device_auth is not None:
+        billing_kwargs["on_device_auth"] = on_device_auth
+    resolved_signer_url, resolved_signer_headers, resolved_discovery_url = _resolve_billing(
+        resolved_billing_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        **billing_kwargs,
+    )
+    if (
+        resolved_discovery_url is not None
+        and resolved_discovery_headers is None
+        and resolved_signer_headers is not None
+    ):
+        resolved_discovery_headers = resolved_signer_headers
 
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, req.model_id)
     # Orchestrator discovery precedence after token-first field resolution:
@@ -359,7 +433,7 @@ def start_lv2v(
             p = session.get_payment()
             headers: dict[str, str] = {
                 "Livepeer-Payment": p.payment,
-                "Livepeer-Segment": p.seg_creds,
+                "Livepeer-Segment": p.seg_creds or "",
             }
 
             base = _http_origin(info.transcoder)
