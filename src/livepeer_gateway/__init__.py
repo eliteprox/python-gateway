@@ -1,4 +1,13 @@
-from .byoc import BYOCJob, BYOCJobRequest, start_byoc_job
+from .byoc import (
+    BYOCJob,
+    BYOCJobRequest,
+    BYOCProcessRequest,
+    BYOCProcessResponse,
+    BYOCProcessStream,
+    process_byoc_request,
+    start_byoc_job,
+    stream_byoc_request,
+)
 from .byoc_payments import BYOCPaymentSession
 from .capabilities import CapabilityId, build_capabilities
 from .channel_reader import ChannelReader, JSONLReader
@@ -34,6 +43,7 @@ from .orchestrator import discover_orchestrators
 from .remote_signer import PaymentSession
 from .scope import start_scope
 from .selection import SelectionCursor, orchestrator_selector
+from .sse import SSEClient, SSEEvent
 from .token import parse_token
 from .trickle_publisher import (
     TricklePublishError,
@@ -48,6 +58,9 @@ from .trickle_subscriber import TrickleSubscriber, TrickleSubscriberStats
 __all__ = [
     "BYOCJob",
     "BYOCJobRequest",
+    "BYOCProcessRequest",
+    "BYOCProcessResponse",
+    "BYOCProcessStream",
     "BYOCPaymentSession",
     "Control",
     "ControlConfig",
@@ -84,9 +97,13 @@ __all__ = [
     "SelectionCursor",
     "orchestrator_selector",
     "StartJobRequest",
+    "process_byoc_request",
     "start_byoc_job",
     "start_lv2v",
     "start_scope",
+    "stream_byoc_request",
+    "SSEClient",
+    "SSEEvent",
     "TricklePublishError",
     "TricklePublisher",
     "TricklePublisherStats",

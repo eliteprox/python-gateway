@@ -1,7 +1,9 @@
 # Image upscale (BYOC)
 
 > [!NOTE]
-> **TODO** — `test.sh` and the `gateway:` compose service collapse into a single Python script using the client SDK once [livepeer/livepeer-python-gateway#6](https://github.com/livepeer/livepeer-python-gateway/pull/6) merges.
+> `test.sh` calls this BYOC capability through the Python SDK. Set
+> `LIVEPEER_TOKEN` to a token with signer/discovery credentials before running
+> the test.
 
 
 A ~2x image super-resolution BYOC capability — proves the SDK handles binary
@@ -13,19 +15,20 @@ A `Pipeline` subclass loads the model once in `setup()`, then takes a
 base64-encoded image on each `POST /run` and returns the upscaled PNG.
 The processor pads inputs to its window size before upscaling, so output
 dimensions are at least 2x input but may be slightly larger. Registered as
-a BYOC capability, called through the gateway, response flows back
-end-to-end.
+a BYOC capability, called through the Python SDK, and routed through the
+orchestrator.
 
 ## Run
 
 > [!WARNING]
 > Only one example can run at a time — all share container names
-> (`gateway`, `orchestrator`, …) and ports (`1935`, `9935`, `5000`). If
+> (`orchestrator`, worker, …) and host ports (`1935`, `5000`). If
 > `./test.sh` fails at the capability-registration step, run `docker
 > compose down` in the other example's directory first.
 
 ```bash
 docker compose up -d --wait --build
+export LIVEPEER_TOKEN=...
 ./test.sh
 docker compose down
 ```
@@ -46,26 +49,22 @@ docker compose down
 ```mermaid
 sequenceDiagram
     autonumber
-    participant curl
-    participant gateway
+    participant sdk as Python SDK
     participant orchestrator
     participant image_upscale as image_upscale<br/>(SDK container)
 
-    curl->>gateway: POST /process/request/run
-    gateway->>orchestrator: forward (Livepeer-signed)
+    sdk->>orchestrator: signed BYOC request
     orchestrator->>image_upscale: POST /run {"image":"<base64>"}
     image_upscale-->>orchestrator: {"image":"<base64>","width":W,"height":H}
-    orchestrator-->>gateway: response
-    gateway-->>curl: response
+    orchestrator-->>sdk: response
 ```
 
-Four compose services:
+Two compose services:
 
 | Service                   | What it is                                                                                                                                         |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gateway`, `orchestrator` | `livepeer/go-livepeer:master` from Docker Hub                                                                                                      |
+| `orchestrator`             | `livepeer/go-livepeer:master`, running with host networking                                                                                        |
 | `image_upscale`           | The pipeline container — a [BYOC](https://github.com/livepeer/go-livepeer/blob/main/doc/byoc.md) capability built with `livepeer_gateway.runner`.  |
-| `register_capability`     | One-shot helper that POSTs to `orchestrator:8935/capability/register` once `image_upscale` is healthy                                              |
 
 The pipeline service has a healthcheck that probes `GET /health` until the
 model finishes loading. `register_capability` waits on `service_healthy`, so
@@ -99,13 +98,10 @@ Or manually:
 ```bash
 INPUT_B64=$(base64 -w0 < your.png)
 
-LIVEPEER_HDR=$(printf '%s' \
-  '{"request":"{}","parameters":"{}","capability":"image-upscale","timeout_seconds":60}' \
-  | base64 -w0)
-
-curl -X POST http://localhost:9935/process/request/run \
-    -H "Livepeer: ${LIVEPEER_HDR}" \
-    -H "Content-Type: application/json" \
-    -d "{\"image\":\"${INPUT_B64}\"}" \
+PYTHONPATH=../../../src python3 ../byoc_request.py \
+    --token "$LIVEPEER_TOKEN" \
+    --capability image-upscale \
+    --route run \
+    --body-json "{\"image\":\"${INPUT_B64}\"}" \
     | jq -r '.image' | base64 -d > upscaled.png
 ```

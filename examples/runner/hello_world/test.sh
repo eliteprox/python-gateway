@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# E2E: send a request through the gateway, assert the response from the
+# E2E: send a request through the Python SDK, assert the response from the
 # hello_world container comes back through the orchestrator.
-
-# TODO: see README — migration to the Python client SDK.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 NAME="${NAME:-livepeer}"
 EXPECTED_MSG="hello, ${NAME}"
 
@@ -28,13 +26,14 @@ if ! docker logs hello_world 2>&1 | grep -q "registered capability=hello-world";
     echo "Make sure 'docker compose up -d --wait --build' completed first."
     exit 1
 fi
-LIVEPEER_HDR=$(printf '%s' '{"request":"{}","parameters":"{}","capability":"hello-world","timeout_seconds":30}' | base64 -w0)
 
-echo "Sending request through gateway..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/request/run" \
-    -H "Livepeer: ${LIVEPEER_HDR}" \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"${NAME}\"}")
+echo "Sending request through SDK..."
+RESPONSE=$(PYTHONPATH=../../../src python3 ../byoc_request.py \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability hello-world \
+    --route run \
+    --body-json "{\"name\":\"${NAME}\"}" \
+    --timeout-seconds 30)
 
 echo "Response: ${RESPONSE}"
 

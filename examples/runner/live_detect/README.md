@@ -1,7 +1,9 @@
 # Live detect (BYOC, real-time, multi-modal)
 
 > [!NOTE]
-> **TODO** — `test.sh`, `demo.sh`, `_format_records.py`, and the `gateway:` compose service collapse into a single Python script using the client SDK once [livepeer/livepeer-python-gateway#6](https://github.com/livepeer/livepeer-python-gateway/pull/6) merges.
+> `test.sh` and `demo.sh` use the Python SDK for BYOC stream start/stop and
+> data-channel SSE subscription. Set `LIVEPEER_TOKEN` to a token with
+> signer/discovery credentials before running them.
 
 Real-time **object detection + speech-to-text** on the same stream.
 Detection via [YOLOv8n](https://github.com/ultralytics/ultralytics) (~6 MB,

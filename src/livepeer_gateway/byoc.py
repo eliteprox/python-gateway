@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .byoc_payments import BYOCPaymentSession
@@ -30,6 +30,7 @@ from .media_publish import MediaPublish, MediaPublishConfig
 from .orch_info import get_orch_info as _get_orch_info
 from .orchestrator import _extract_error_message, resolve_transcoder_http_url
 from .selection import orchestrator_selector
+from .sse import SSEClient
 
 _LOG = logging.getLogger(__name__)
 
@@ -231,6 +232,62 @@ class BYOCJobRequest:
 
 
 @dataclass(frozen=True)
+class BYOCProcessRequest:
+    capability: str
+    route: str = "run"
+    request_id: Optional[str] = None
+    request: Optional[dict[str, Any]] = None
+    parameters: Optional[dict[str, Any]] = None
+    body: Optional[dict[str, Any]] = None
+    timeout_seconds: int = 30
+    request_endpoint: str = "/process/request"
+    stream_payment_endpoint: str = "/ai/stream/payment"
+
+    def _job_id(self) -> str:
+        if self.request_id and self.request_id.strip():
+            return self.request_id.strip()
+        return uuid.uuid4().hex
+
+    def _request_json(self) -> str:
+        payload: dict[str, Any] = {}
+        if self.request:
+            payload.update(self.request)
+        return json.dumps(payload, separators=(",", ":"))
+
+    def _parameters_json(self) -> str:
+        payload: dict[str, Any] = {}
+        if self.parameters:
+            payload.update(self.parameters)
+        return json.dumps(payload, separators=(",", ":"))
+
+    def _body(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.body:
+            payload.update(self.body)
+        return payload
+
+
+@dataclass(frozen=True)
+class BYOCProcessResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: Any
+    job_id: str
+    capability: str
+    orchestrator_url: str
+
+
+@dataclass(frozen=True)
+class BYOCProcessStream:
+    status_code: int
+    headers: dict[str, str]
+    events: SSEClient
+    job_id: str
+    capability: str
+    orchestrator_url: str
+
+
+@dataclass(frozen=True)
 class BYOCJob:
     raw: dict[str, Any]
     job_id: str
@@ -246,6 +303,7 @@ class BYOCJob:
     _payment_session: Optional[BYOCPaymentSession] = field(default=None, repr=False, compare=False)
     _signed_job_header: Optional[str] = field(default=None, repr=False, compare=False)
     _payment_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
+    _stream_update_url: Optional[str] = field(default=None, repr=False, compare=False)
     _stream_stop_url: Optional[str] = field(default=None, repr=False, compare=False)
     _stop_timeout_s: float = field(default=30.0, repr=False, compare=False)
 
@@ -257,6 +315,7 @@ class BYOCJob:
         capability: str,
         payment_session: Optional[BYOCPaymentSession] = None,
         signed_job_header: Optional[str] = None,
+        stream_update_url: Optional[str] = None,
         stream_stop_url: Optional[str] = None,
         stop_timeout_s: float = 30.0,
     ) -> "BYOCJob":
@@ -283,6 +342,7 @@ class BYOCJob:
             events=Events(events_url) if events_url else None,
             _payment_session=payment_session,
             _signed_job_header=signed_job_header,
+            _stream_update_url=stream_update_url,
             _stream_stop_url=stream_stop_url,
             _stop_timeout_s=stop_timeout_s,
         )
@@ -356,6 +416,19 @@ class BYOCJob:
             _post_byoc_stop,
             self._stream_stop_url,
             payload={"stream_id": self.job_id},
+            headers={"Livepeer": self._signed_job_header},
+            timeout=self._stop_timeout_s,
+        )
+
+    async def update_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not self._stream_update_url:
+            raise LivepeerGatewayError("No stream update URL present on this BYOC job")
+        if not self._signed_job_header:
+            raise LivepeerGatewayError("No signed job header present on this BYOC job")
+        return await asyncio.to_thread(
+            _post_byoc_update,
+            self._stream_update_url,
+            payload=params,
             headers={"Livepeer": self._signed_job_header},
             timeout=self._stop_timeout_s,
         )
@@ -451,6 +524,112 @@ def _get_start_payment_headers(
     return payment_header, segment_header
 
 
+@dataclass(frozen=True)
+class _SignedBYOCRequest:
+    job_id: str
+    capability: str
+    timeout_seconds: int
+    signed_job_header: str
+    headers: dict[str, str]
+    payment_info: Any
+    payment_session: BYOCPaymentSession
+
+    def payment_retry_headers(self) -> dict[str, str]:
+        payment_header, segment_header = _get_start_payment_headers(
+            self.payment_session,
+            payment_info=self.payment_info,
+            capability_name=self.capability,
+            allow_skip=False,
+        )
+        return {
+            "Livepeer": self.signed_job_header,
+            "Livepeer-Payment": payment_header or "",
+            "Livepeer-Segment": segment_header,
+        }
+
+
+def _request_json_for_signing(req: BYOCJobRequest | BYOCProcessRequest, job_id: str) -> str:
+    if isinstance(req, BYOCJobRequest):
+        return req._request_json(job_id)
+    return req._request_json()
+
+
+def _signed_byoc_request(
+    *,
+    selected_url: str,
+    req: BYOCJobRequest | BYOCProcessRequest,
+    signer_url: Optional[str],
+    signer_headers: Optional[dict[str, str]],
+    capabilities: Any,
+    use_tofu: bool,
+) -> _SignedBYOCRequest:
+    capability_name = req.capability.strip()
+    payment_info, payment_capabilities = _get_payment_orch_info(
+        selected_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+        capabilities=capabilities,
+        capability_name=capability_name,
+        use_tofu=use_tofu,
+    )
+
+    session = BYOCPaymentSession(
+        signer_url,
+        payment_info,
+        capability_name=capability_name,
+        signer_headers=signer_headers,
+        capabilities=payment_capabilities,
+        stream_payment_endpoint=req.stream_payment_endpoint,
+        use_tofu=use_tofu,
+    )
+
+    job_id = req._job_id()
+    request_json = _request_json_for_signing(req, job_id)
+    parameters_json = req._parameters_json()
+    timeout_seconds = max(1, int(req.timeout_seconds))
+    signed = session.sign_byoc_job(
+        job_id=job_id,
+        capability=capability_name,
+        request=request_json,
+        parameters=parameters_json,
+        timeout_seconds=timeout_seconds,
+    )
+
+    signed_payload = {
+        "id": job_id,
+        "request": request_json,
+        "parameters": parameters_json,
+        "capability": capability_name,
+        "sender": signed.sender,
+        "sig": signed.signature,
+        "timeout_seconds": timeout_seconds,
+    }
+    signed_job_header = base64.b64encode(
+        json.dumps(signed_payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    payment_header, segment_header = _get_start_payment_headers(
+        session,
+        payment_info=payment_info,
+        capability_name=capability_name,
+        allow_skip=True,
+    )
+    headers = {"Livepeer": signed_job_header}
+    if payment_header:
+        headers["Livepeer-Payment"] = payment_header
+        headers["Livepeer-Segment"] = segment_header
+
+    return _SignedBYOCRequest(
+        job_id=job_id,
+        capability=capability_name,
+        timeout_seconds=timeout_seconds,
+        signed_job_header=signed_job_header,
+        headers=headers,
+        payment_info=payment_info,
+        payment_session=session,
+    )
+
+
 def _post_byoc_json(
     url: str,
     *,
@@ -526,6 +705,22 @@ def _post_byoc_start(
     return _post_byoc_json(url, payload=payload, headers=headers, timeout=timeout, op="start")
 
 
+def _post_byoc_process(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+) -> dict[str, Any]:
+    return _post_byoc_json(
+        url,
+        payload=payload,
+        headers=headers,
+        timeout=timeout,
+        op="process request",
+    )
+
+
 def _post_byoc_stop(
     url: str,
     *,
@@ -534,6 +729,16 @@ def _post_byoc_stop(
     timeout: float,
 ) -> dict[str, Any]:
     return _post_byoc_json(url, payload=payload, headers=headers, timeout=timeout, op="stop")
+
+
+def _post_byoc_update(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+) -> dict[str, Any]:
+    return _post_byoc_json(url, payload=payload, headers=headers, timeout=timeout, op="update")
 
 
 def _derive_stream_stop_url(start_url: str, job_id: str) -> str:
@@ -547,6 +752,76 @@ def _derive_stream_stop_url(start_url: str, job_id: str) -> str:
     else:
         raise ValueError(f"Cannot derive stream stop URL from start URL: {start_url!r}")
     return urlunparse(parsed._replace(path=path))
+
+
+def _derive_stream_update_url(start_url: str, job_id: str) -> str:
+    parsed = urlparse(start_url)
+    path = parsed.path or ""
+    quoted_job_id = quote(job_id, safe="")
+    if path.endswith("/process/stream/start"):
+        path = path[: -len("/process/stream/start")] + f"/process/stream/{quoted_job_id}/update"
+    elif path.endswith("/start"):
+        path = path[: -len("/start")] + "/update"
+    else:
+        raise ValueError(f"Cannot derive stream update URL from start URL: {start_url!r}")
+    return urlunparse(parsed._replace(path=path))
+
+
+def _process_request_url(base_url: str, req: BYOCProcessRequest) -> str:
+    endpoint = req.request_endpoint.strip()
+    if not endpoint:
+        raise LivepeerGatewayError("BYOCProcessRequest.request_endpoint must be non-empty")
+    route = req.route.strip().lstrip("/")
+    parsed = urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        root = endpoint.rstrip("/") + "/"
+    else:
+        root = resolve_transcoder_http_url(base_url, endpoint.rstrip("/") + "/")
+    return urljoin(root, route)
+
+
+def _resolve_byoc_token(
+    token: Optional[str],
+    *,
+    orch_url: Optional[Sequence[str] | str],
+    signer_url: Optional[str],
+    signer_headers: Optional[dict[str, str]],
+    discovery_url: Optional[str],
+    discovery_headers: Optional[dict[str, str]],
+) -> tuple[
+    Optional[Sequence[str] | str],
+    Optional[str],
+    Optional[dict[str, str]],
+    Optional[str],
+    Optional[dict[str, str]],
+]:
+    resolved_orch_url = orch_url
+    resolved_signer_url = signer_url
+    resolved_signer_headers = signer_headers
+    resolved_discovery_url = discovery_url
+    resolved_discovery_headers = discovery_headers
+    if token is not None:
+        from .token import parse_token
+
+        token_data = parse_token(token)
+        token_orchestrators = token_data.get("orchestrators")
+        if token_orchestrators is not None:
+            resolved_orch_url = token_orchestrators
+        if resolved_signer_url is None:
+            resolved_signer_url = token_data.get("signer")
+        if resolved_signer_headers is None:
+            resolved_signer_headers = token_data.get("signer_headers")
+        if resolved_discovery_url is None:
+            resolved_discovery_url = token_data.get("discovery")
+        if resolved_discovery_headers is None:
+            resolved_discovery_headers = token_data.get("discovery_headers")
+    return (
+        resolved_orch_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        resolved_discovery_headers,
+    )
 
 
 def start_byoc_job(
@@ -576,26 +851,24 @@ def start_byoc_job(
     if not isinstance(req.stream_payment_endpoint, str) or not req.stream_payment_endpoint.strip():
         raise LivepeerGatewayError("BYOCJobRequest.stream_payment_endpoint must be non-empty")
 
-    resolved_signer_url = signer_url
-    resolved_signer_headers = signer_headers
-    resolved_discovery_url = discovery_url
-    resolved_discovery_headers = discovery_headers
-    if token is not None:
-        from .token import parse_token
-
-        token_data = parse_token(token)
-        if resolved_signer_url is None:
-            resolved_signer_url = token_data.get("signer")
-        if resolved_signer_headers is None:
-            resolved_signer_headers = token_data.get("signer_headers")
-        if resolved_discovery_url is None:
-            resolved_discovery_url = token_data.get("discovery")
-        if resolved_discovery_headers is None:
-            resolved_discovery_headers = token_data.get("discovery_headers")
+    (
+        resolved_orch_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        resolved_discovery_headers,
+    ) = _resolve_byoc_token(
+        token,
+        orch_url=orch_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+        discovery_url=discovery_url,
+        discovery_headers=discovery_headers,
+    )
 
     capabilities = build_capabilities(CapabilityId.BYOC, req.capability.strip())
     cursor = orchestrator_selector(
-        orch_url,
+        resolved_orch_url,
         signer_url=resolved_signer_url,
         signer_headers=resolved_signer_headers,
         discovery_url=resolved_discovery_url,
@@ -676,6 +949,7 @@ def start_byoc_job(
             start_url = resolve_transcoder_http_url(info.transcoder, req.stream_start_endpoint)
             try:
                 stop_url = _derive_stream_stop_url(start_url, job_id)
+                update_url = _derive_stream_update_url(start_url, job_id)
             except ValueError as e:
                 raise LivepeerGatewayError(str(e)) from e
             start_payload = req._body(job_id)
@@ -712,6 +986,7 @@ def start_byoc_job(
                 capability=capability_name,
                 payment_session=session,
                 signed_job_header=signed_job_header,
+                stream_update_url=update_url,
                 stream_stop_url=stop_url,
                 stop_timeout_s=float(timeout_seconds),
             )
@@ -724,3 +999,191 @@ def start_byoc_job(
                 str(e),
             )
             start_rejections.append(OrchestratorRejection(url=selected_url, reason=str(e)))
+
+
+def process_byoc_request(
+    orch_url: Optional[Sequence[str] | str],
+    req: BYOCProcessRequest,
+    *,
+    token: Optional[str] = None,
+    signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
+    discovery_url: Optional[str] = None,
+    discovery_headers: Optional[dict[str, str]] = None,
+    use_tofu: bool = True,
+) -> BYOCProcessResponse:
+    if not isinstance(req.capability, str) or not req.capability.strip():
+        raise LivepeerGatewayError("process_byoc_request requires a non-empty capability")
+    if not isinstance(req.route, str):
+        raise LivepeerGatewayError("BYOCProcessRequest.route must be a string")
+    if not isinstance(req.stream_payment_endpoint, str) or not req.stream_payment_endpoint.strip():
+        raise LivepeerGatewayError("BYOCProcessRequest.stream_payment_endpoint must be non-empty")
+
+    (
+        resolved_orch_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        resolved_discovery_headers,
+    ) = _resolve_byoc_token(
+        token,
+        orch_url=orch_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+        discovery_url=discovery_url,
+        discovery_headers=discovery_headers,
+    )
+    capabilities = build_capabilities(CapabilityId.BYOC, req.capability.strip())
+    cursor = orchestrator_selector(
+        resolved_orch_url,
+        signer_url=resolved_signer_url,
+        signer_headers=resolved_signer_headers,
+        discovery_url=resolved_discovery_url,
+        discovery_headers=resolved_discovery_headers,
+        capabilities=capabilities,
+        use_tofu=use_tofu,
+    )
+
+    process_rejections: list[OrchestratorRejection] = []
+    while True:
+        try:
+            selected_url, info = cursor.next()
+        except NoOrchestratorAvailableError as e:
+            all_rejections = list(e.rejections) + process_rejections
+            if all_rejections:
+                raise NoOrchestratorAvailableError(
+                    f"All orchestrators failed ({len(all_rejections)} tried)",
+                    rejections=all_rejections,
+                ) from None
+            raise
+
+        try:
+            signed_req = _signed_byoc_request(
+                selected_url=selected_url,
+                req=req,
+                signer_url=resolved_signer_url,
+                signer_headers=resolved_signer_headers,
+                capabilities=capabilities,
+                use_tofu=use_tofu,
+            )
+            process_url = _process_request_url(info.transcoder, req)
+            payload = req._body()
+            timeout = float(signed_req.timeout_seconds)
+            try:
+                data = _post_byoc_process(
+                    process_url,
+                    payload=payload,
+                    headers=signed_req.headers,
+                    timeout=timeout,
+                )
+            except PaymentRequiredError:
+                _LOG.debug("BYOC process returned HTTP 402; retrying with a fresh payment ticket")
+                data = _post_byoc_process(
+                    process_url,
+                    payload=payload,
+                    headers=signed_req.payment_retry_headers(),
+                    timeout=timeout,
+                )
+            return BYOCProcessResponse(
+                status_code=int(data["status_code"]),
+                headers=data["headers"],
+                body=data["body"],
+                job_id=signed_req.job_id,
+                capability=signed_req.capability,
+                orchestrator_url=selected_url,
+            )
+        except LivepeerGatewayError as e:
+            _LOG.debug(
+                "process_byoc_request candidate failed, trying fallback if available: %s (%s)",
+                selected_url,
+                str(e),
+            )
+            process_rejections.append(OrchestratorRejection(url=selected_url, reason=str(e)))
+
+
+def stream_byoc_request(
+    orch_url: Optional[Sequence[str] | str],
+    req: BYOCProcessRequest,
+    *,
+    token: Optional[str] = None,
+    signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
+    discovery_url: Optional[str] = None,
+    discovery_headers: Optional[dict[str, str]] = None,
+    use_tofu: bool = True,
+) -> BYOCProcessStream:
+    if not isinstance(req.capability, str) or not req.capability.strip():
+        raise LivepeerGatewayError("stream_byoc_request requires a non-empty capability")
+    if not isinstance(req.route, str):
+        raise LivepeerGatewayError("BYOCProcessRequest.route must be a string")
+
+    (
+        resolved_orch_url,
+        resolved_signer_url,
+        resolved_signer_headers,
+        resolved_discovery_url,
+        resolved_discovery_headers,
+    ) = _resolve_byoc_token(
+        token,
+        orch_url=orch_url,
+        signer_url=signer_url,
+        signer_headers=signer_headers,
+        discovery_url=discovery_url,
+        discovery_headers=discovery_headers,
+    )
+    capabilities = build_capabilities(CapabilityId.BYOC, req.capability.strip())
+    cursor = orchestrator_selector(
+        resolved_orch_url,
+        signer_url=resolved_signer_url,
+        signer_headers=resolved_signer_headers,
+        discovery_url=resolved_discovery_url,
+        discovery_headers=resolved_discovery_headers,
+        capabilities=capabilities,
+        use_tofu=use_tofu,
+    )
+
+    stream_rejections: list[OrchestratorRejection] = []
+    while True:
+        try:
+            selected_url, info = cursor.next()
+        except NoOrchestratorAvailableError as e:
+            all_rejections = list(e.rejections) + stream_rejections
+            if all_rejections:
+                raise NoOrchestratorAvailableError(
+                    f"All orchestrators failed ({len(all_rejections)} tried)",
+                    rejections=all_rejections,
+                ) from None
+            raise
+
+        try:
+            signed_req = _signed_byoc_request(
+                selected_url=selected_url,
+                req=req,
+                signer_url=resolved_signer_url,
+                signer_headers=resolved_signer_headers,
+                capabilities=capabilities,
+                use_tofu=use_tofu,
+            )
+            process_url = _process_request_url(info.transcoder, req)
+            events = SSEClient.post_json(
+                process_url,
+                payload=req._body(),
+                headers=signed_req.headers,
+                timeout=float(signed_req.timeout_seconds),
+                retry_headers=signed_req.payment_retry_headers,
+            )
+            return BYOCProcessStream(
+                status_code=0,
+                headers={},
+                events=events,
+                job_id=signed_req.job_id,
+                capability=signed_req.capability,
+                orchestrator_url=selected_url,
+            )
+        except LivepeerGatewayError as e:
+            _LOG.debug(
+                "stream_byoc_request candidate failed, trying fallback if available: %s (%s)",
+                selected_url,
+                str(e),
+            )
+            stream_rejections.append(OrchestratorRejection(url=selected_url, reason=str(e)))

@@ -4,14 +4,12 @@
 # the luma plane has spatial variance (i.e., the depth model produced a
 # non-uniform output rather than a fixed grayscale fill).
 #
-# Path: ffmpeg push (RTMP) → mediamtx → gateway → orch → runner → orch → mediamtx → ffmpeg pull (RTMP)
-
-# TODO: see README — migration to the Python client SDK.
+# Path: SDK start → orch → runner.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 OUTPUT_FILE="${OUTPUT_FILE:-/tmp/live_depth_output.mts}"
 
 echo "Waiting for capability registration..."
@@ -32,24 +30,20 @@ if ! docker logs live_depth 2>&1 | grep -q "registered capability=live-depth"; t
     exit 1
 fi
 
-# `parameters` is a stringified JSON; enable_video_{ingress,egress} drive
-# trickle channel creation (go-livepeer byoc/types.go).
-LIVEPEER_HDR=$(printf '%s' \
-  '{"request":"{}","parameters":"{\"enable_video_ingress\":true,\"enable_video_egress\":true}","capability":"live-depth","timeout_seconds":60}' \
-  | base64 -w0)
-
 # Best-effort session cleanup; registered early to catch Ctrl-C.
-# `${STREAM_ID:-}` so an early failure (before stream/start succeeded) doesn't
-# trip `set -u` when the trap fires.
-trap 'curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID:-}/stop" -H "Livepeer: ${LIVEPEER_HDR}" -d "{}" >/dev/null 2>&1 || true' EXIT
+JOB_FILE=$(mktemp -t live_depth.XXXXXX.job.json)
+trap 'PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE:-}" >/dev/null 2>&1 || true; rm -f "${JOB_FILE:-}"' EXIT
 
 echo "Starting stream session..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/stream/start" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}')
+PYTHONPATH=../../../src python3 ../byoc_live.py start \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability live-depth \
+    --job-file "${JOB_FILE}" \
+    --timeout-seconds 60 >/dev/null
 
-STREAM_ID=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['stream_id'])")
-RTMP_IN=$(echo  "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_url'])")
-RTMP_OUT=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_output_url'].split(',')[0])")
+STREAM_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['job_id'])" "${JOB_FILE}")
+RTMP_IN=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['publish_url'])" "${JOB_FILE}")
+RTMP_OUT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['subscribe_url'])" "${JOB_FILE}")
 echo "  stream_id=${STREAM_ID}"
 echo "  rtmp_in =${RTMP_IN}"
 echo "  rtmp_out=${RTMP_OUT}"

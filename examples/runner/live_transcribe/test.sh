@@ -1,24 +1,15 @@
 #!/usr/bin/env bash
 # E2E test for live_transcribe — pushes a known English speech clip (JFK's
 # "Ask not..." inaugural, ~11 s) through the full BYOC stack, subscribes to
-# the gateway's data SSE proxy, and asserts JSON transcript records arrive
+# the SDK data SSE subscriber, and asserts JSON transcript records arrive
 # containing recognisable words from the speech.
 #
-# Path:  ffmpeg push (RTMP) → mediamtx → gateway → orch → runner → emit_data
-#                                               ↑                              │
-#         curl SSE subscribe ─── gateway data proxy ──────────────────────────┘
-#                                  (GET /process/stream/{id}/data)
-#
-# The gateway exposes the per-session data trickle channel as a Server-Sent
-# Events stream on its already-public HTTP port — no need to reach the
-# orchestrator directly. See go-livepeer byoc/stream_gateway.go:StreamData.
-
-# TODO: see README — migration to the Python client SDK.
+# Path: SDK start → orch → runner → emit_data → SDK SSE subscriber.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 
 echo "Waiting for capability registration..."
 # SDK self-registers inside the pipeline container; look for the log line
@@ -38,18 +29,9 @@ if ! docker logs live_transcribe 2>&1 | grep -q "registered capability=live-tran
     exit 1
 fi
 
-# `parameters` is a stringified JSON; enable_video_{ingress,egress} drive
-# trickle channel creation (go-livepeer byoc/types.go).
-# enable_data_output is what makes the gateway return a real `data_url` and
-# subscribe to the runner's emit_data channel for SSE proxying.
-LIVEPEER_HDR=$(printf '%s' \
-  '{"request":"{}","parameters":"{\"enable_video_ingress\":true,\"enable_video_egress\":true,\"enable_data_output\":true}","capability":"live-transcribe","timeout_seconds":120}' \
-  | base64 -w0)
-
 # Best-effort session cleanup; registered early to catch Ctrl-C.
-# `${STREAM_ID:-}` so an early failure (before stream/start succeeded) doesn't
-# trip `set -u` when the trap fires. Subscriber pid cleanup too.
-trap 'kill ${SUB_PID:-} 2>/dev/null || true; curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID:-}/stop" -H "Livepeer: ${LIVEPEER_HDR}" -d "{}" >/dev/null 2>&1 || true' EXIT
+JOB_FILE=$(mktemp -t live_transcribe.XXXXXX.job.json)
+trap 'kill ${SUB_PID:-} 2>/dev/null || true; PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE:-}" >/dev/null 2>&1 || true; rm -f "${JOB_FILE:-}"' EXIT
 
 # JFK "Ask not..." (~11s, 44.1kHz stereo) — whisper's own test fixture, so
 # tiny.en transcribes it reliably. Cached under assets/ on first run.
@@ -62,13 +44,16 @@ if [ ! -f "${SAMPLE_FILE}" ]; then
 fi
 
 echo "Starting stream session..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/stream/start" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}')
+PYTHONPATH=../../../src python3 ../byoc_live.py start \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability live-transcribe \
+    --enable-data-output \
+    --job-file "${JOB_FILE}" \
+    --timeout-seconds 120 >/dev/null
 
-STREAM_ID=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['stream_id'])")
-RTMP_IN=$(echo  "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_url'])")
-RTMP_IN="${RTMP_IN/mediamtx:/localhost:}"
-DATA_URL="${GATEWAY_URL}/process/stream/${STREAM_ID}/data"
+STREAM_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['job_id'])" "${JOB_FILE}")
+RTMP_IN=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['publish_url'])" "${JOB_FILE}")
+DATA_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['data_url'])" "${JOB_FILE}")
 echo "  stream_id=${STREAM_ID}"
 echo "  rtmp_in =${RTMP_IN}"
 echo "  data_url=${DATA_URL}"
@@ -79,7 +64,7 @@ echo "  data_url=${DATA_URL}"
 # with `data: ` carry the JSON payload).
 SSE_OUT=$(mktemp -t live_transcribe.XXXXXX.sse)
 echo "Subscribing to data channel SSE..."
-curl -fsS -N --max-time 30 "${DATA_URL}" > "${SSE_OUT}" 2>/dev/null &
+PYTHONPATH=../../../src python3 ../byoc_live.py subscribe-data --job-file "${JOB_FILE}" --timeout-seconds 30 > "${SSE_OUT}" 2>/dev/null &
 SUB_PID=$!
 sleep 1  # let curl establish the connection before we start pushing
 
@@ -102,8 +87,7 @@ ffmpeg -loglevel error -re \
 # before /stream/stop fires. The gateway closes its SSE proxy on stop
 # without draining, so we wait here, not after.
 sleep 4
-curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID}/stop" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}' >/dev/null 2>&1 || true
+PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE}" >/dev/null 2>&1 || true
 # Buffer for the SSE subscriber to flush before we cancel the curl reader.
 sleep 5
 # Wait for the SSE subscriber to terminate (gateway sends `event: end`

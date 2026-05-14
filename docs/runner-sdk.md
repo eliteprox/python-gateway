@@ -32,6 +32,41 @@ transport modes:
 `make_app(pipeline)` dispatches on the base class. Health is `GET /health`
 on both.
 
+## Calling BYOC runners with the SDK
+
+Runner examples now use the Python SDK as the caller-side gateway. The compose
+stacks keep an orchestrator for local capability registration, but no longer run
+a separate go-livepeer gateway container. Each orchestrator uses host networking
+so it advertises a host-reachable service address, and each worker registers a
+host-reachable `LIVEPEER_CAPABILITY_URL`.
+
+Set `LIVEPEER_TOKEN` to a base64 JSON token containing signer and discovery
+credentials, and optionally an orchestrator list:
+
+```json
+{
+  "signer": "https://signer.example",
+  "discovery": "https://discovery.example",
+  "orchestrators": ["https://127.0.0.1:8935"]
+}
+```
+
+Batch workers are called through `examples/runner/byoc_request.py`:
+
+```bash
+PYTHONPATH=src python3 examples/runner/byoc_request.py \
+  --token "$LIVEPEER_TOKEN" \
+  --capability sentiment \
+  --route run \
+  --body-json '{"text":"Livepeer makes decentralized inference effortless"}'
+```
+
+Streaming `Pipeline` workers pass `--stream`; the helper prints standard SSE
+lines and stops at `data: [DONE]`. Live workers use
+`examples/runner/byoc_live.py start|update|stop|subscribe-data` so stream
+control and data-channel SSE stay in the SDK path rather than the removed
+gateway container.
+
 ## `Pipeline` — batch
 
 ```python

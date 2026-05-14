@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# E2E: send a chat request through the gateway, assert the LLM streams
+# E2E: send a chat request through the Python SDK, assert the LLM streams
 # tokens back via SSE and terminates with [DONE].
-
-# TODO: see README — migration to the Python client SDK.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 PROMPT="${PROMPT:-Say hello in three words}"
 
 echo "Waiting for capability registration..."
@@ -27,14 +25,16 @@ if ! docker logs llm 2>&1 | grep -q "registered capability=llm"; then
     echo "Make sure 'docker compose up -d --wait --build' completed first." >&2
     exit 1
 fi
-LIVEPEER_HDR=$(printf '%s' '{"request":"{}","parameters":"{}","capability":"llm","timeout_seconds":120}' | base64 -w0)
 
-echo "Sending chat request through gateway (streaming)..."
-# -N disables curl output buffering so chunks arrive as they're generated.
-RESPONSE=$(curl -fsSN -X POST "${GATEWAY_URL}/process/request/run" \
-    -H "Livepeer: ${LIVEPEER_HDR}" \
-    -H "Content-Type: application/json" \
-    -d "{\"prompt\":\"${PROMPT}\"}")
+echo "Sending chat request through SDK (streaming)..."
+BODY=$(PROMPT="${PROMPT}" python3 -c 'import json, os; print(json.dumps({"prompt": os.environ["PROMPT"]}))')
+RESPONSE=$(PYTHONPATH=../../../src python3 ../byoc_request.py \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability llm \
+    --route run \
+    --stream \
+    --body-json "${BODY}" \
+    --timeout-seconds 120)
 
 echo "Response (first events):"
 echo "${RESPONSE}" | head -10

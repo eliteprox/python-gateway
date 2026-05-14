@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
 # E2E test for live_detect — pushes OpenCV's `vtest.avi` plaza-pedestrian
 # clip + JFK's "Ask not..." audio through the BYOC stack, subscribes to
-# the gateway's data SSE proxy, and asserts both:
+# the SDK data SSE subscriber, and asserts both:
 #   - detection records arrive containing "person"
 #   - transcript records arrive containing "country"
 # Validates that both `process_video` and `process_audio` hooks fire on the
 # same pipeline, with two emit_data streams ({"type": "detection"} and
 # {"type": "transcript"}) interleaving cleanly on the data channel.
 #
-# Path:  ffmpeg push (RTMP) → mediamtx → gateway → orch → runner → emit_data
-#                                               ↑                              │
-#         curl SSE subscribe ─── gateway data proxy ──────────────────────────┘
-#                                  (GET /process/stream/{id}/data)
-
-# TODO: see README — migration to the Python client SDK.
+# Path: SDK start → orch → runner → emit_data → SDK SSE subscriber.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 
 echo "Waiting for capability registration..."
 # SDK self-registers inside the pipeline container; look for the log line
@@ -38,11 +33,8 @@ if ! docker logs live_detect 2>&1 | grep -q "registered capability=live-detect";
     exit 1
 fi
 
-LIVEPEER_HDR=$(printf '%s' \
-  '{"request":"{}","parameters":"{\"enable_video_ingress\":true,\"enable_video_egress\":true,\"enable_data_output\":true}","capability":"live-detect","timeout_seconds":120}' \
-  | base64 -w0)
-
-trap 'kill ${SUB_PID:-} 2>/dev/null || true; curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID:-}/stop" -H "Livepeer: ${LIVEPEER_HDR}" -d "{}" >/dev/null 2>&1 || true' EXIT
+JOB_FILE=$(mktemp -t live_detect.XXXXXX.job.json)
+trap 'kill ${SUB_PID:-} 2>/dev/null || true; PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE:-}" >/dev/null 2>&1 || true; rm -f "${JOB_FILE:-}"' EXIT
 
 # Audio fixture: JFK "Ask not..." (~11s) — same source as live_transcribe.
 AUDIO_URL="${AUDIO_URL:-https://github.com/openai/whisper/raw/main/tests/jfk.flac}"
@@ -58,20 +50,23 @@ mkdir -p assets
 [ -f "${VIDEO_FILE}" ] || { echo "Downloading video fixture..."; curl -fsSL -o "${VIDEO_FILE}" "${VIDEO_URL}"; }
 
 echo "Starting stream session..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/stream/start" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}')
+PYTHONPATH=../../../src python3 ../byoc_live.py start \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability live-detect \
+    --enable-data-output \
+    --job-file "${JOB_FILE}" \
+    --timeout-seconds 120 >/dev/null
 
-STREAM_ID=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['stream_id'])")
-RTMP_IN=$(echo  "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_url'])")
-RTMP_IN="${RTMP_IN/mediamtx:/localhost:}"
-DATA_URL="${GATEWAY_URL}/process/stream/${STREAM_ID}/data"
+STREAM_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['job_id'])" "${JOB_FILE}")
+RTMP_IN=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['publish_url'])" "${JOB_FILE}")
+DATA_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['data_url'])" "${JOB_FILE}")
 echo "  stream_id=${STREAM_ID}"
 echo "  rtmp_in =${RTMP_IN}"
 echo "  data_url=${DATA_URL}"
 
 SSE_OUT=$(mktemp -t live_detect.XXXXXX.sse)
 echo "Subscribing to data channel SSE..."
-curl -fsS -N --max-time 30 "${DATA_URL}" > "${SSE_OUT}" 2>/dev/null &
+PYTHONPATH=../../../src python3 ../byoc_live.py subscribe-data --job-file "${JOB_FILE}" --timeout-seconds 30 > "${SSE_OUT}" 2>/dev/null &
 SUB_PID=$!
 sleep 1
 
@@ -92,8 +87,7 @@ ffmpeg -loglevel error -re \
 # before /stream/stop fires. The gateway closes its SSE proxy on stop
 # without draining, so we wait here, not after.
 sleep 4
-curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID}/stop" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}' >/dev/null 2>&1 || true
+PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE}" >/dev/null 2>&1 || true
 # Buffer for the SSE subscriber to flush before we cancel the curl reader.
 sleep 5
 wait "${SUB_PID}" 2>/dev/null || true

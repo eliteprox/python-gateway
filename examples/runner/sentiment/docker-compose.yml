@@ -6,33 +6,16 @@ services:
   orchestrator:
     image: livepeer/go-livepeer:master
     container_name: orchestrator
+    network_mode: host
     command: >
       -network arbitrum-one-mainnet
       -orchestrator
       -ethUrl https://arb1.arbitrum.io/rpc
       -ethPassword secret-password
       -pricePerUnit 0
-      -serviceAddr=orchestrator:8935
+      -serviceAddr=${LIVEPEER_HOST_IP:-127.0.0.1}:8935
       -orchSecret=orch-secret
       -v 6
-
-  # TODO: see README — service removed after migration to the Python client SDK.
-  gateway:
-    image: livepeer/go-livepeer:master
-    container_name: gateway
-    command: >
-      -network arbitrum-one-mainnet
-      -gateway
-      -ethUrl https://arb1.arbitrum.io/rpc
-      -ethPassword secret-password
-      -orchAddr=orchestrator:8935
-      -httpAddr=0.0.0.0:9935
-      -httpIngest
-      -v 6
-    ports:
-      - "9935:9935"
-    depends_on:
-      - orchestrator
 
   sentiment:
     build:
@@ -41,6 +24,8 @@ services:
     container_name: sentiment
     ports:
       - "5000:5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Healthcheck waits for setup() to finish loading the model before the
     # orchestrator can route requests here. Without this, register_capability
     # could complete and the test could fire before the model is loaded.
@@ -52,10 +37,10 @@ services:
       retries: 30
       start_period: 60s
     environment:
-      LIVEPEER_ORCH_URL:        https://orchestrator:8935
+      LIVEPEER_ORCH_URL:        https://host.docker.internal:8935
       LIVEPEER_ORCH_SECRET:     orch-secret
       LIVEPEER_CAPABILITY_NAME: sentiment
-      LIVEPEER_CAPABILITY_URL:  http://sentiment:5000
+      LIVEPEER_CAPABILITY_URL:  http://host.docker.internal:5000
     depends_on:
       - orchestrator
 

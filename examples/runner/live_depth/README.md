@@ -1,7 +1,9 @@
 # Live depth (BYOC, real-time, GPU)
 
 > [!NOTE]
-> **TODO** — `test.sh`, `demo.sh`, and the `gateway:` compose service collapse into a single Python script using the client SDK once [livepeer/livepeer-python-gateway#6](https://github.com/livepeer/livepeer-python-gateway/pull/6) merges.
+> `test.sh` and `demo.sh` use the Python SDK for BYOC stream start/stop. Set
+> `LIVEPEER_TOKEN` to a token with signer/discovery credentials before running
+> them.
 
 
 Real-time monocular depth estimation via [DepthAnything V2](https://github.com/DepthAnything/Depth-Anything-V2).

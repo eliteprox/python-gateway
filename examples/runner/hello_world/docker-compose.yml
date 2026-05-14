@@ -6,33 +6,16 @@ services:
   orchestrator:
     image: livepeer/go-livepeer:master
     container_name: orchestrator
+    network_mode: host
     command: >
       -network arbitrum-one-mainnet
       -orchestrator
       -ethUrl https://arb1.arbitrum.io/rpc
       -ethPassword secret-password
       -pricePerUnit 0
-      -serviceAddr=orchestrator:8935
+      -serviceAddr=${LIVEPEER_HOST_IP:-127.0.0.1}:8935
       -orchSecret=orch-secret
       -v 6
-
-  # TODO: see README — service removed after migration to the Python client SDK.
-  gateway:
-    image: livepeer/go-livepeer:master
-    container_name: gateway
-    command: >
-      -network arbitrum-one-mainnet
-      -gateway
-      -ethUrl https://arb1.arbitrum.io/rpc
-      -ethPassword secret-password
-      -orchAddr=orchestrator:8935
-      -httpAddr=0.0.0.0:9935
-      -httpIngest
-      -v 6
-    ports:
-      - "9935:9935"
-    depends_on:
-      - orchestrator
 
   hello_world:
     build:
@@ -41,11 +24,13 @@ services:
     container_name: hello_world
     ports:
       - "5000:5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      LIVEPEER_ORCH_URL:        https://orchestrator:8935
+      LIVEPEER_ORCH_URL:        https://host.docker.internal:8935
       LIVEPEER_ORCH_SECRET:     orch-secret
       LIVEPEER_CAPABILITY_NAME: hello-world
-      LIVEPEER_CAPABILITY_URL:  http://hello_world:5000
+      LIVEPEER_CAPABILITY_URL:  http://host.docker.internal:5000
     depends_on:
       - orchestrator
 

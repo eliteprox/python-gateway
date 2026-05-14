@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E test for the LivePipeline real-time runner. One stream session,
 # two captures: first asserts the default tint (chroma ≈ 128 → grayscale),
-# then POSTs new params via /process/stream/{id}/update and asserts the
+# then updates params via the Python SDK and asserts the
 # second capture reflects them. This exercises both `process_video` and
 # `on_params_update` end-to-end through the BYOC stack. Skip the viewer
 # with SKIP_VIEWER=1 in CI.
@@ -17,7 +17,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 OUTPUT_FILE="${OUTPUT_FILE:-/tmp/live_tint_output.mts}"
 OUTPUT_FILE_GRAY="${OUTPUT_FILE%.mts}_gray.mts"
 OUTPUT_FILE_TINT="${OUTPUT_FILE%.mts}_tint.mts"
@@ -45,24 +45,21 @@ if ! docker logs live_tint 2>&1 | grep -q "registered capability=live-tint"; the
     exit 1
 fi
 
-# `parameters` is a stringified JSON; enable_video_{ingress,egress} drive
-# trickle channel creation (go-livepeer byoc/types.go).
-LIVEPEER_HDR=$(printf '%s' \
-  '{"request":"{}","parameters":"{\"enable_video_ingress\":true,\"enable_video_egress\":true}","capability":"live-tint","timeout_seconds":120}' \
-  | base64 -w0)
-
 # Best-effort session cleanup; registered early to catch Ctrl-C.
-# `${STREAM_ID:-}` so an early failure (before stream/start succeeded) doesn't
-# trip `set -u` when the trap fires.
-trap 'curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID:-}/stop" -H "Livepeer: ${LIVEPEER_HDR}" -d "{}" >/dev/null 2>&1 || true' EXIT
+# `${JOB_FILE:-}` so an early failure doesn't trip `set -u` when the trap fires.
+JOB_FILE=$(mktemp -t live_tint.XXXXXX.job.json)
+trap 'PYTHONPATH=../../../src python3 ../byoc_live.py stop --job-file "${JOB_FILE:-}" >/dev/null 2>&1 || true; rm -f "${JOB_FILE:-}"' EXIT
 
 echo "Starting stream session..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/stream/start" \
-    -H "Livepeer: ${LIVEPEER_HDR}" -d '{}')
+PYTHONPATH=../../../src python3 ../byoc_live.py start \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability live-tint \
+    --job-file "${JOB_FILE}" \
+    --timeout-seconds 120 >/dev/null
 
-STREAM_ID=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['stream_id'])")
-RTMP_IN=$(echo  "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_url'])")
-RTMP_OUT=$(echo "${RESPONSE}" | python3 -c "import json,sys; print(json.load(sys.stdin)['rtmp_output_url'].split(',')[0])")
+STREAM_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['job_id'])" "${JOB_FILE}")
+RTMP_IN=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['publish_url'])" "${JOB_FILE}")
+RTMP_OUT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['subscribe_url'])" "${JOB_FILE}")
 echo "  stream_id=${STREAM_ID}"
 echo "  rtmp_in =${RTMP_IN}"
 echo "  rtmp_out=${RTMP_OUT}"
@@ -110,10 +107,9 @@ fi
 # segment to land on the egress channel. 2s @ 1s GOP = at least one fresh
 # I-frame after the update arrives.
 echo "Posting tint update u=${TINT_U} v=${TINT_V}..."
-curl -fsS -X POST "${GATEWAY_URL}/process/stream/${STREAM_ID}/update" \
-    -H "Livepeer: ${LIVEPEER_HDR}" \
-    -H "Content-Type: application/json" \
-    -d "{\"u\": ${TINT_U}, \"v\": ${TINT_V}}" >/dev/null
+PYTHONPATH=../../../src python3 ../byoc_live.py update \
+    --job-file "${JOB_FILE}" \
+    --params-json "{\"u\": ${TINT_U}, \"v\": ${TINT_V}}" >/dev/null
 sleep 2
 
 # Capture #2 — same egress stream, new tint should be live.

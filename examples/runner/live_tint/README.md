@@ -1,14 +1,16 @@
 # Live tint (BYOC, real-time)
 
 > [!NOTE]
-> **TODO** — `test.sh`, `demo.sh`, and the `gateway:` compose service collapse into a single Python script using the client SDK once [livepeer/livepeer-python-gateway#6](https://github.com/livepeer/livepeer-python-gateway/pull/6) merges.
+> `test.sh` and `demo.sh` use the Python SDK for BYOC stream
+> start/update/stop. Set `LIVEPEER_TOKEN` to a token with signer/discovery
+> credentials before running them.
 
 
 A minimal real-time video pipeline that doubles as the SDK's
 **parameter-update demo**. Each video frame's chroma planes are
 overwritten with a constant `(u, v)` pair — `(128, 128)` produces
 grayscale, other values shift the tint. The caller can change `(u, v)`
-mid-stream via `POST /process/stream/{id}/update` and the next frame
+mid-stream via `byoc_live.py update` and the next frame
 reflects the new tint. Audio passes through unchanged.
 
 The whole pipeline is three hooks:
@@ -39,12 +41,13 @@ mutate in `on_params_update`, read in `process_video`.
 
 > [!WARNING]
 > Only one example can run at a time — all share container names
-> (`gateway`, `orchestrator`, …) and ports (`1935`, `9935`, `5000`). If
+> (`orchestrator`, worker, …) and host ports (`1935`, `5000`). If
 > `./test.sh` fails at the capability-registration step, run `docker
 > compose down` in the other example's directory first.
 
 ```bash
 docker compose up -d --wait --build
+export LIVEPEER_TOKEN=...
 
 ./test.sh                          # CI: synthetic stream, asserts default grayscale, opens ffplay
 ./demo.sh                          # interactive: webcam in, tint shifts mid-stream
@@ -65,33 +68,16 @@ docker compose down
 `RETRIES=N` overrides the pull retry count (default 20) for fast-fail
 iteration.
 
-### `demo.sh` — live webcam viewer with mid-stream re-tinting
+### `demo.sh` — SDK stream session with mid-stream re-tinting
 
-Pushes your webcam through the pipeline and opens an ffplay window. After
-a short warmup the script POSTs three `{"u", "v"}` updates to
-`/process/stream/{id}/update` so the visible tint cycles **blue → red →
-neutral** in real time. Close the window or Ctrl-C to stop.
+Starts a stream session with `byoc_live.py`, prints the publish/subscribe
+URLs, and posts three `{"u", "v"}` updates through the SDK so the visible tint
+cycles **blue → red → neutral** once media is being published.
 
 ```bash
-./demo.sh                              # default: cycle through three tints
-TINT_DELAY=0 ./demo.sh                 # stay grayscale (skip the cycle)
-WEBCAM_FPS=30 ./demo.sh                # smoother, may stall on slower CPUs
-WEBCAM_RES=640x480 WEBCAM_FPS=15 ./demo.sh
-WEBCAM_DEVICE=/dev/video1 ./demo.sh    # Linux: pick a different camera
+./demo.sh
+TINT_INTERVAL=2 ./demo.sh
 ```
-
-Defaults to 320×240 @ 15fps. The PyAV encode loop is the sustained-throughput
-bottleneck — 30fps stalls after ~10s on most hardware; 15fps holds steadily.
-If the live viewer disconnects mid-stream, you've hit the throughput ceiling —
-drop FPS or resolution. The proper fix (drop policies in `MediaPublish`) is
-tracked in [issue #8](https://github.com/livepeer/livepeer-python-gateway/issues/8).
-
-| Platform | Source                                                        |
-| -------- | ------------------------------------------------------------- |
-| Linux    | `/dev/video0` via `v4l2` (override with `WEBCAM_DEVICE`)      |
-| macOS    | First `avfoundation` device (override with `WEBCAM_DEVICE=N`) |
-
-Requires `ffmpeg` and `ffplay` on the host.
 
 #### Driving the tint by hand
 
@@ -99,10 +85,9 @@ Once `./demo.sh` is up (or any stream session is active) you can post
 your own values from another shell:
 
 ```bash
-curl -fsS -X POST "http://localhost:9935/process/stream/${STREAM_ID}/update" \
-  -H "Livepeer: ${LIVEPEER_HDR}" \
-  -H "Content-Type: application/json" \
-  -d '{"u": 60, "v": 200}'   # warm/red
+PYTHONPATH=../../../src python3 ../byoc_live.py update \
+  --job-file "$JOB_FILE" \
+  --params-json '{"u": 60, "v": 200}'
 ```
 
 `u` and `v` are bytes (0–255). 128/128 is neutral; shift `u` for blue↔yellow
@@ -114,43 +99,31 @@ ignored, never error the session.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant ffmpeg
-    participant mediamtx
-    participant gateway
+    participant sdk as Python SDK
     participant orchestrator
     participant live_tint as live_tint<br/>(SDK container)
 
-    ffmpeg->>gateway: POST /process/stream/start (Livepeer envelope)
-    gateway->>orchestrator: forward (signed)
+    sdk->>orchestrator: signed /ai/stream/start
     orchestrator->>live_tint: POST /stream/start (subscribe_url, publish_url, …)
     live_tint-->>orchestrator: 200
-    gateway-->>ffmpeg: { rtmp_url, rtmp_output_url, stream_id, … }
-
-    ffmpeg->>mediamtx: RTMP push (rtmp_url)
-    mediamtx->>orchestrator: trickle ingest
     orchestrator->>live_tint: trickle subscribe → frames
     Note over live_tint: TintFilter.process_video writes (u,v)
 
-    ffmpeg->>gateway: POST /process/stream/{id}/update {"u":..,"v":..}
-    gateway->>orchestrator: /ai/stream/update (signed)
+    sdk->>orchestrator: signed /ai/stream/update {"u":..,"v":..}
     orchestrator->>live_tint: POST /stream/params
     Note over live_tint: on_params_update mutates self._u/self._v
 
     live_tint->>orchestrator: trickle publish → frames (new tint)
-    orchestrator->>mediamtx: trickle egress
-    mediamtx-->>ffmpeg: RTMP pull (rtmp_output_url)
-
-    ffmpeg->>gateway: POST /process/stream/{id}/stop
+    sdk->>orchestrator: signed /ai/stream/stop
 ```
 
-Five compose services:
+Three compose services:
 
 | Service                   | What it is                                                                                                                                                                                                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gateway`, `orchestrator` | `livepeer/go-livepeer:master` from Docker Hub                                                                                                                                                                                                                                               |
-| `mediamtx`                | RTMP frontend the gateway points at via `LIVE_AI_PLAYBACK_HOST`. Caller pushes RTMP here; processed output served back as RTMP. `mediamtx.yml` wires `runOnReady` to the gateway's BYOC ingest webhook; `Dockerfile.mediamtx` repackages the scratch image with curl so the webhook can fire. |
+| `orchestrator`            | `livepeer/go-livepeer:master`, running with host networking                                                                                                                                                                                                                                  |
+| `mediamtx`                | Optional local RTMP helper for demos. The SDK owns stream start/update/stop.                                                                                                                                                                                                                  |
 | `live_tint`               | The pipeline container — a [BYOC](https://github.com/livepeer/go-livepeer/blob/main/doc/byoc.md) capability built with `livepeer_gateway.runner.LivePipeline`.                                                                                                                              |
-| `register_capability`     | One-shot helper that POSTs to `orchestrator:8935/capability/register` once `live_tint` is healthy                                                                                                                                                                                           |
 
 The pipeline service has a healthcheck that probes `GET /health` until
 `setup()` finishes (state machine reaches `OK`). `register_capability`
@@ -159,7 +132,7 @@ but not loaded" container.
 
 ## Wire contract (the parts that matter)
 
-`POST /process/stream/start`'s `Livepeer:` header carries the job
+The SDK's signed BYOC job envelope carries the job
 envelope. Two fields drive what trickle channels the orchestrator
 creates:
 
@@ -179,7 +152,6 @@ creates:
 
 Verified against `byoc/stream_orchestrator.go:93-131` in go-livepeer.
 
-Mid-stream parameter updates flow `POST /process/stream/{id}/update`
-(gateway) → `/ai/stream/update` (orchestrator) → `POST /stream/params`
-(runner) → `LivePipeline.on_params_update`. The body is forwarded
+Mid-stream parameter updates flow through `/ai/stream/update` (orchestrator)
+→ `POST /stream/params` (runner) → `LivePipeline.on_params_update`. The body is forwarded
 unchanged — whatever JSON the caller posts becomes the `params` dict.

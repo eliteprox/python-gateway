@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# E2E: send a request through the gateway, assert the upscaled image
+# E2E: send a request through the Python SDK, assert the upscaled image
 # (2x of the 32x32 fixture = 64x64) comes back through the orchestrator.
-
-# TODO: see README — migration to the Python client SDK.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:9935}"
+: "${LIVEPEER_TOKEN:?Set LIVEPEER_TOKEN to a BYOC token with signer/discovery credentials.}"
 TEST_IMAGE="${TEST_IMAGE:-test_image.png}"
 INPUT_WIDTH="${INPUT_WIDTH:-64}"
 INPUT_HEIGHT="${INPUT_HEIGHT:-64}"
@@ -31,13 +29,17 @@ if ! docker logs image_upscale 2>&1 | grep -q "registered capability=image-upsca
 fi
 
 INPUT_B64=$(base64 -w0 < "${TEST_IMAGE}")
-LIVEPEER_HDR=$(printf '%s' '{"request":"{}","parameters":"{}","capability":"image-upscale","timeout_seconds":60}' | base64 -w0)
 
-echo "Sending request through gateway..."
-RESPONSE=$(curl -fsS -X POST "${GATEWAY_URL}/process/request/run" \
-    -H "Livepeer: ${LIVEPEER_HDR}" \
-    -H "Content-Type: application/json" \
-    -d "{\"image\":\"${INPUT_B64}\"}")
+echo "Sending request through SDK..."
+BODY_FILE=$(mktemp -t image_upscale.XXXXXX.json)
+trap 'rm -f "${BODY_FILE}"' EXIT
+INPUT_B64="${INPUT_B64}" python3 -c 'import json, os, sys; json.dump({"image": os.environ["INPUT_B64"]}, open(sys.argv[1], "w"))' "${BODY_FILE}"
+RESPONSE=$(PYTHONPATH=../../../src python3 ../byoc_request.py \
+    --token "${LIVEPEER_TOKEN}" \
+    --capability image-upscale \
+    --route run \
+    --body-file "${BODY_FILE}" \
+    --timeout-seconds 60)
 
 # Trim the base64 image from the echoed response — keeps stdout readable.
 echo "Response (image truncated): $(echo "${RESPONSE}" | sed 's/\("image":"\)[^"]*/\1<base64>/')"

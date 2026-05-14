@@ -1,7 +1,9 @@
 # Live transcribe (BYOC, real-time)
 
 > [!NOTE]
-> **TODO** — `test.sh`, `demo.sh`, `_format_records.py`, and the `gateway:` compose service collapse into a single Python script using the client SDK once [livepeer/livepeer-python-gateway#6](https://github.com/livepeer/livepeer-python-gateway/pull/6) merges. The gateway-path on_stream_stop drop disappears with the migration.
+> `test.sh` and `demo.sh` use the Python SDK for BYOC stream start/stop and
+> data-channel SSE subscription. Set `LIVEPEER_TOKEN` to a token with
+> signer/discovery credentials before running them.
 
 Streaming speech-to-text via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 running [tiny.en](https://huggingface.co/Systran/faster-whisper-tiny.en).

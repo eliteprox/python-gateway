@@ -6,39 +6,18 @@ services:
   orchestrator:
     image: livepeer/go-livepeer:master
     container_name: orchestrator
+    network_mode: host
     command: >
       -network arbitrum-one-mainnet
       -orchestrator
       -ethUrl https://arb1.arbitrum.io/rpc
       -ethPassword secret-password
       -pricePerUnit 0
-      -serviceAddr=orchestrator:8935
+      -serviceAddr=${LIVEPEER_HOST_IP:-127.0.0.1}:8935
       -orchSecret=orch-secret
       -v 6
 
-  # TODO: see README — service removed after migration to the Python client SDK.
-  gateway:
-    image: livepeer/go-livepeer:master
-    container_name: gateway
-    command: >
-      -network arbitrum-one-mainnet
-      -gateway
-      -ethUrl https://arb1.arbitrum.io/rpc
-      -ethPassword secret-password
-      -orchAddr=orchestrator:8935
-      -httpAddr=0.0.0.0:9935
-      -httpIngest
-      -v 6
-    environment:
-      LIVE_AI_PLAYBACK_HOST: rtmp://mediamtx:1935
-    ports:
-      - "9935:9935"
-    depends_on:
-      - orchestrator
-      - mediamtx
-
-  # RTMP frontend. Custom build adds curl to the scratch base so mediamtx.yml's
-  # `runOnReady` can call the gateway — no Livepeer mediamtx fork required.
+  # RTMP frontend for local demos that still pull/push RTMP media.
   mediamtx:
     build:
       context: .
@@ -56,6 +35,8 @@ services:
     container_name: live_tint
     ports:
       - "5000:5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Healthcheck waits for setup() to complete so register_capability + tests don't race the LOADING state.
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -65,10 +46,10 @@ services:
       retries: 30
       start_period: 30s
     environment:
-      LIVEPEER_ORCH_URL:        https://orchestrator:8935
+      LIVEPEER_ORCH_URL:        https://host.docker.internal:8935
       LIVEPEER_ORCH_SECRET:     orch-secret
       LIVEPEER_CAPABILITY_NAME: live-tint
-      LIVEPEER_CAPABILITY_URL:  http://live_tint:5000
+      LIVEPEER_CAPABILITY_URL:  http://host.docker.internal:5000
     depends_on:
       - orchestrator
 
